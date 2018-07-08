@@ -1,0 +1,14 @@
+bin/
+include/
+lib/
+pip-selfcheck.json
+share/
+__pycache__/
+logs/
+*.h5
+*.swp
+*.png
+data/
+exp_data
+raw_data
+word2vec
