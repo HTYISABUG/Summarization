@@ -8,20 +8,26 @@ class Model(object):
     def build(self):
         hps = self.__hps
 
+        self.global_step = tf.Variable(0, name='global_step', trainable=False)
+
         # encoder
         self.__enc_batch = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch') # word ids
         self.__enc_lens = tf.placeholder(tf.int32, [hps.batch_size], name='enc_lens') # sentence lengths
+        self.__enc_pad_mask = tf.placeholder(tf.bool, [hps.batch_size, None], name='enc_pad_mask') # mask the PAD tokens
         self.__enc_batch_ext_vocab = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch_ext_vocab')
         self.__max_n_oov = tf.placeholder(tf.int32, [], name='max_n_oov')
 
         # decoder
         self.__dec_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='dec_batch') # word ids
+        self.__dec_pad_mask = tf.placeholder(tf.bool, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
         self.__target_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='target_batch') # target word ids
 
         # embedding
         self.__embs = tf.placeholder(tf.float32, [hps.vocab_size, hps.emb_dim], name='embs')
 
         self.__build_seq2seq()
+
+        self.__summary = tf.summary.merge_all()
 
     def __build_seq2seq(self):
         hps = self.__hps
@@ -64,11 +70,11 @@ class Model(object):
         """Add a single-layer bidirectional LSTM encoder to the graph.
 
         Args:
-          encoder_inputs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
+            encoder_inputs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
 
         Returns:
-          outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
-          fw_state, bw_state: Each are LSTMStateTuples of shape ([batch_size, hidden_dim], [batch_size, hidden_dim])
+            outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
+            fw_state, bw_state: Each are LSTMStateTuples of shape ([batch_size, hidden_dim], [batch_size, hidden_dim])
         """
 
         hps = self.__hps
@@ -87,11 +93,11 @@ class Model(object):
            This is needed because the encoder is bidirectional but the decoder is not.
 
         Args:
-          fw_stat: LSTMStateTuple with hidden_dim units.
-          bw_stat: LSTMStateTuple with hidden_dim units.
+            fw_stat: LSTMStateTuple with hidden_dim units.
+            bw_stat: LSTMStateTuple with hidden_dim units.
 
         Returns:
-          state: LSTMStateTuple with hidden_dim units.
+            state: LSTMStateTuple with hidden_dim units.
         """
 
         hps = self.__hps
@@ -110,14 +116,14 @@ class Model(object):
         """Add attention decoder to the graph.
 
         Args:
-          inputs: inputs to the decoder (word embeddings). A list of tensors shape (batch_size, emb_dim)
-          enc_outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
-          state: LSTMStateTuple with hidden_dim units.
+            inputs: inputs to the decoder (word embeddings). A list of tensors shape (batch_size, emb_dim)
+            enc_outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
+            state: LSTMStateTuple with hidden_dim units.
 
         Returns:
-          outputs: List of tensors; the outputs of the decoder
-          state: The final state of the decoder
-          p_gens: A list of tensors shape (batch_size, 1); the generation probabilities
+            outputs: List of tensors; the outputs of the decoder
+            state: The final state of the decoder
+            p_gens: A list of tensors shape (batch_size, 1); the generation probabilities
         """
 
         hps = self.__hps
@@ -126,8 +132,15 @@ class Model(object):
             cell = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.rand_unif_init, state_is_tuple=True)
 
             with tf.variable_scope('attention'):
+
+                def masked_probability_fn(score):
+                    attn_dist = tf.nn.softmax(score)
+                    attn_dist *= self.__enc_pad_mask
+                    attn_sum  = tf.reduce_sum(attn_dist, axis=1)
+                    return attn_dist / tf.reshape(attn_sum, [-1, 1])
+
                 num_units = self.__enc_outputs.get_shape()[2]
-                mechanism = tf.contrib.seq2seq.BahdanauAttention(num_units, enc_outputs)
+                mechanism = tf.contrib.seq2seq.BahdanauAttention(num_units, enc_outputs, probability_fn=masked_probability_fn)
                 attention_wrapper = tf.contrib.seq2seq.AttentionWrapper(cell, mechanism, alignment_history=True)
 
             outputs = []
@@ -158,12 +171,12 @@ class Model(object):
         """Calculate the final distribution, for the pointer-generator model
 
         Args:
-          vocab_dists: The vocabulary distributions. List length max_dec_steps of (batch_size, vsize) arrays. The words are in the order they appear in the vocabulary file.
-          attn_dists: The attention distributions. List length max_dec_steps of (batch_size, attn_len) arrays
-          p_gens: A list of tensors shape (batch_size, 1); the generation probabilities
+            vocab_dists: The vocabulary distributions. List length max_dec_steps of (batch_size, vsize) arrays. The words are in the order they appear in the vocabulary file.
+            attn_dists: The attention distributions. List length max_dec_steps of (batch_size, attn_len) arrays
+            p_gens: A list of tensors shape (batch_size, 1); the generation probabilities
 
         Returns:
-          final_dists: The final distributions. List length max_dec_steps of (batch_size, extended_vsize) arrays.
+            final_dists: The final distributions. List length max_dec_steps of (batch_size, extended_vsize) arrays.
         """
 
         hps = self.__hps
@@ -201,7 +214,13 @@ class Model(object):
                 loss = -tf.log(probs)
                 losses.append(loss)
 
-            return tf.reduce_mean(losses)
+            dec_lens = tf.reduce_sum(self.__dec_pad_mask, axis=1)
+            losses = [loss * self.__dec_pad_mask[:, step] for step, loss in enumerate(losses)]
+            loss = tf.reduce_mean(sum(losses) / dec_lens)
+
+            tf.summary.scalar('loss', loss)
+
+            return loss
 
     def __build_train_op(self, loss):
         hps = self.__hps
@@ -209,6 +228,8 @@ class Model(object):
         with tf.variable_scope('train_op'):
             grads = tf.gradients(loss, tf.trainable_variables(), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
             grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
+
+            tf.summary.scalar('global_norm', global_norm)
 
             optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
             return optimizer.apply_gradients(zip(grads, tf.trainable_variables), global_step=self.__global_step, name='train_op')
