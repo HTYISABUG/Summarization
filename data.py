@@ -5,10 +5,10 @@ import tensorflow as tf
 _SENTENCE_START = '<s>'
 _SENTENCE_END   = '</s>'
 
-_PAD_TOKEN       = 'PAD'
-_UNKNOWN_TOKEN   = 'UNK'
-_START_TOKEN     = 'START'
-_STOP_TOKEN      = 'STOP'
+PAD_TOKEN       = 'PAD'
+UNKNOWN_TOKEN   = 'UNK'
+START_TOKEN     = 'START'
+STOP_TOKEN      = 'STOP'
 
 class Vocab(object):
 
@@ -59,11 +59,41 @@ class Vocab(object):
     def size(self):
         return self.__size
 
-def abstract2id(abstract_word, vocab, article_oovs):
+def article2ids(article_words, vocab):
+    """Map the article words to their ids. Also return a list of OOVs in the article.
+
+    Args:
+        article_words: list of words (strings)
+        vocab: Vocabulary object
+
+    Returns:
+        ids: A list of word ids (integers); OOVs are represented by their temporary article OOV number.
+        oovs: A list of the OOV words in the article (strings), in the order corresponding to their temporary article OOV numbers.
+    """
+
+    ids = []
+    oovs = []
+    unk_id = vocab.w2i(_UNKNOWN_TOKEN)
+
+    for w in article_words:
+        id_ = vocab.w2i(w)
+
+        if id_ == unk_id:
+            if w not in oovs:
+                oovs.append(w)
+
+            oov_idx = oovs.index(w)
+            ids.append(vocab.size() + oov_idx)
+        else:
+            ids.append(id_)
+
+    return ids, oovs
+
+def abstract2ids(abstract_words, vocab, article_oovs):
     """ Map the abstract words to their ids. In-article OOVs are mapped to their temporary OOV numbers.
 
     Args:
-        abstract_word: list of words (strings)
+        abstract_words: list of words (strings)
         vocab: Vocabulary object
         article_oovs: list of in-article OOV words (strings), in the order corresponding to their temporary article OOV numbers
 
@@ -74,7 +104,7 @@ def abstract2id(abstract_word, vocab, article_oovs):
     ids = []
     unk_id = vocab.w2i(_UNKNOWN_TOKEN)
 
-    for w in abstract_word:
+    for w in abstract_words:
         i = vocab.w2i[w]
 
         if i == unk_id: # if w is an OOV word
@@ -88,7 +118,7 @@ def abstract2id(abstract_word, vocab, article_oovs):
 
     return ids
 
-def output2word(self, ids, vocab, article_oovs):
+def output2words(self, ids, vocab, article_oovs):
     """ Maps output ids to words, including mapping in-article OOVs from their temporary ids to the original OOV string (applicable in pointer-generator mode).
 
     Args:
@@ -118,7 +148,7 @@ def output2word(self, ids, vocab, article_oovs):
 
     return words
 
-def abstract2sen(self, abstract):
+def abstract2sens(self, abstract):
     """ Splits abstract text from datafile into list of sentences.
 
     Args:
