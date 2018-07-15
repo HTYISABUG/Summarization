@@ -1,4 +1,7 @@
+import time
+
 import tensorflow as tf
+import numpy as np
 
 class Model(object):
 
@@ -8,18 +11,22 @@ class Model(object):
     def build(self):
         hps = self.__hps
 
+        tf.logging.info('Building graph...')
+
+        ts = time.time()
+
         self.global_step = tf.Variable(0, name='global_step', trainable=False)
 
         # encoder
         self.__enc_batch = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch') # word ids
         self.__enc_lens = tf.placeholder(tf.int32, [hps.batch_size], name='enc_lens') # sentence lengths
-        self.__enc_pad_mask = tf.placeholder(tf.bool, [hps.batch_size, None], name='enc_pad_mask') # mask the PAD tokens
+        self.__enc_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='enc_pad_mask') # mask the PAD tokens
         self.__enc_batch_ext_vocab = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch_ext_vocab')
         self.__max_n_oov = tf.placeholder(tf.int32, [], name='max_n_oov')
 
         # decoder
         self.__dec_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='dec_batch') # word ids
-        self.__dec_pad_mask = tf.placeholder(tf.bool, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
+        self.__dec_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
         self.__target_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='target_batch') # target word ids
 
         # embedding
@@ -28,6 +35,8 @@ class Model(object):
         self.__build_seq2seq()
 
         self.__summary = tf.summary.merge_all()
+
+        tf.logging.info('Time to build graph: %i seconds', time.time() - ts)
 
     def __build_seq2seq(self):
         hps = self.__hps
@@ -39,9 +48,9 @@ class Model(object):
             enc_inputs, dec_inputs = self.__build_embedding()
             enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs)
             dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
-            dec_outputs, dec_out_state, p_gens = self.__build_decoder(dec_inputs, enc_outputs, dec_in_state)
+            dec_outputs, dec_out_state, attn_dists, p_gens = self.__build_decoder(dec_inputs, enc_outputs, dec_in_state)
             vocab_dists = self.__build_vocab_distribution(dec_outputs)
-            final_dists = self.__build_final_distribution(vocab_dists, dec_out_state.attention_state.stack(), p_gens)
+            final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens)
 
             loss = self.__build_loss(final_dists)
             train_op = self.__build_train_op(loss)
@@ -52,6 +61,17 @@ class Model(object):
             final_dists = final_dists[0]
             top_k_probs, top_k_ids = tf.nn.top_k(final_dists, hps.batch_size * 2)
             top_k_probs = tf.log(top_k_probs)
+
+            self.__top_k_ids = top_k_ids
+            self.__top_k_probs = top_k_probs
+
+        self.__enc_outputs = enc_outputs
+        self.__dec_in_state = dec_in_state
+        self.__dec_out_state = dec_out_state
+        self.__attn_dists = attn_dists
+        self.__p_gens = p_gens
+        self.__loss = loss
+        self.__train_op = train_op
 
     def __build_embedding(self):
         hps = self.__hps
@@ -67,7 +87,7 @@ class Model(object):
 
     def __build_encoder(self, inputs):
 
-        """Add a single-layer bidirectional LSTM encoder to the graph.
+        '''Add a single-layer bidirectional LSTM encoder to the graph.
 
         Args:
             encoder_inputs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
@@ -75,7 +95,7 @@ class Model(object):
         Returns:
             outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
             fw_state, bw_state: Each are LSTMStateTuples of shape ([batch_size, hidden_dim], [batch_size, hidden_dim])
-        """
+        '''
 
         hps = self.__hps
 
@@ -89,7 +109,7 @@ class Model(object):
 
     def __build_reduce_states(self, fw_stat, bw_stat):
 
-        """Add a dense layer to reduce the encoder's final state into a single initial state for the decoder.
+        '''Add a dense layer to reduce the encoder's final state into a single initial state for the decoder.
            This is needed because the encoder is bidirectional but the decoder is not.
 
         Args:
@@ -98,7 +118,7 @@ class Model(object):
 
         Returns:
             state: LSTMStateTuple with hidden_dim units.
-        """
+        '''
 
         hps = self.__hps
 
@@ -113,7 +133,7 @@ class Model(object):
 
     def __build_decoder(self, inputs, enc_outputs, state):
 
-        """Add attention decoder to the graph.
+        '''Add attention decoder to the graph.
 
         Args:
             inputs: inputs to the decoder (word embeddings). A list of tensors shape (batch_size, emb_dim)
@@ -123,8 +143,9 @@ class Model(object):
         Returns:
             outputs: List of tensors; the outputs of the decoder
             state: The final state of the decoder
+            attn_dists: A list containing tensors of shape (batch_size,attn_length).
             p_gens: A list of tensors shape (batch_size, 1); the generation probabilities
-        """
+        '''
 
         hps = self.__hps
 
@@ -139,26 +160,34 @@ class Model(object):
                     attn_sum  = tf.reduce_sum(attn_dist, axis=1)
                     return attn_dist / tf.reshape(attn_sum, [-1, 1])
 
-                num_units = self.__enc_outputs.get_shape()[2]
+                num_units = enc_outputs.get_shape()[2]
                 mechanism = tf.contrib.seq2seq.BahdanauAttention(num_units, enc_outputs, probability_fn=masked_probability_fn)
                 attention_wrapper = tf.contrib.seq2seq.AttentionWrapper(cell, mechanism, alignment_history=True)
 
             outputs = []
+            attn_dists = []
             p_gens = []
 
-            for input_ in inputs:
+            zero_state = attention_wrapper.zero_state(hps.batch_size, tf.float32)
+            state = zero_state.clone(cell_state=state)
+
+            for i, input_ in enumerate(inputs):
+                tf.logging.info("Adding attention decoder timestep %i of %i", i, len(inputs))
+
                 context_vector, state = attention_wrapper(input_, state)
 
-                output = tf.layers.dense(tf.concat([context_vector, state], axis=1), hps.hidden_dim)
+                cell_state = state.cell_state
+                output = tf.layers.dense(tf.concat([context_vector, cell_state.c, cell_state.h], axis=1), hps.hidden_dim)
                 outputs.append(output)
+                attn_dists.append(state.alignments)
 
                 with tf.variable_scope('p_gen'):
-                    p_gen_feature = tf.concat([context_vector, state.c, state.h, input_], axis=1)
+                    p_gen_feature = tf.concat([context_vector, cell_state.c, cell_state.h, input_], axis=1)
                     p_gen = tf.layers.dense(p_gen_feature, 1, activation=tf.nn.softmax)
 
                 p_gens.append(p_gen)
 
-            return outputs, state, p_gens
+            return outputs, state.cell_state, attn_dists, p_gens
 
     def __build_vocab_distribution(self, inputs):
         hps = self.__hps
@@ -168,7 +197,7 @@ class Model(object):
 
     def __build_final_distribution(self, vocab_dists, attn_dists, p_gens):
 
-        """Calculate the final distribution, for the pointer-generator model
+        '''Calculate the final distribution, for the pointer-generator model
 
         Args:
             vocab_dists: The vocabulary distributions. List length max_dec_steps of (batch_size, vsize) arrays. The words are in the order they appear in the vocabulary file.
@@ -177,7 +206,7 @@ class Model(object):
 
         Returns:
             final_dists: The final distributions. List length max_dec_steps of (batch_size, extended_vsize) arrays.
-        """
+        '''
 
         hps = self.__hps
 
@@ -232,4 +261,127 @@ class Model(object):
             tf.summary.scalar('global_norm', global_norm)
 
             optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
-            return optimizer.apply_gradients(zip(grads, tf.trainable_variables), global_step=self.__global_step, name='train_op')
+
+            return optimizer.apply_gradients(zip(grads, tf.trainable_variables()), global_step=self.global_step, name='train_op')
+
+    def __make_feed_dict(self, batch, just_enc=False):
+
+        '''Make a feed dictionary mapping parts of the batch to the appropriate placeholders.
+
+        Args:
+            batch: Batch object
+            just_enc: Boolean. If True, only feed the parts needed for the encoder.
+        '''
+
+        feed_dict = {}
+
+        feed_dict[self.__enc_batch]           = batch.enc_batch
+        feed_dict[self.__enc_lens]            = batch.enc_lens
+        feed_dict[self.__enc_pad_mask]        = batch.enc_pad_mask
+        feed_dict[self.__enc_batch_ext_vocab] = batch.enc_batch_ext_vocab
+        feed_dict[self.__max_n_oov]           = batch.max_n_oov
+
+        if not just_enc:
+            feed_dict[self.__dec_batch]    = batch.dec_batch
+            feed_dict[self.__dec_pad_mask] = batch.dec_pad_mask
+            feed_dict[self.__target_batch] = batch.target_batch
+
+        return feed_dict
+
+    def run_train_step(self, sess, batch):
+
+        '''Runs one training iteration. Returns a dict containing train op, summaries, loss, global_step.'''
+
+        feed_dict = self.__make_feed_dict(batch)
+        rets = {'train_op': self.__train_op,
+                'loss': self.__loss,
+                'global_step': self.global_step}
+
+        return sess.run(rets, feed_dict=feed_dict)
+
+    def run_eval_step(self, sess, batch):
+        feed_dict = self.__make_feed_dict(batch)
+        rets = {'summary': self.__summary,
+                'loss': self.__loss,
+                'global_step': self.global_step}
+
+        return sess.run(rets, feed_dict=feed_dict)
+
+    def run_encoder(self, sess, batch):
+
+        '''For beam search decoding. Run the encoder on the batch and return the encoder states and decoder initial state.
+
+        Args:
+            sess: Tensorflow session.
+            batch: Batch object that is the same example repeated across the batch (for beam search)
+
+        Returns:
+            enc_outputs: The encoder states. A tensor of shape [batch_size, <=max_enc_steps, 2*hidden_dim].
+            dec_in_state: A LSTMStateTuple of shape ([1,hidden_dim],[1,hidden_dim])
+        '''
+
+        feed_dict = self.__make_feed_dict(batch, just_enc=True)
+        enc_outputs, dec_in_state, global_step = sess.run(
+            [self.__enc_outputs, self.__dec_in_state, self.global_step],
+            feed_dict=feed_dict
+        )
+
+        dec_in_state = tf.contrib.rnn.LSTMStateTuple(dec_in_state.c[0], dec_in_state.h[0])
+
+        return enc_outputs, dec_in_state
+
+    def run_decode_once(self, batch, latest_tokens, enc_states, dec_in_states):
+
+        '''For beam search decoding. Run the decoder for one step.
+
+        Args:
+            sess: Tensorflow session.
+            batch: Batch object containing single example repeated across the batch
+            latest_tokens: Tokens to be fed as input into the decoder for this timestep
+            enc_states: The encoder states.
+            dec_in_states: List of beam_size LSTMStateTuples; the decoder states from the previous timestep
+
+        Returns:
+            ids: top 2k ids. shape [beam_size, 2*beam_size]
+            probs: top 2k log probabilities. shape [beam_size, 2*beam_size]
+            dec_out_states: a list length beam_size containing LSTMStateTuples each of shape ([hidden_dim,],[hidden_dim,])
+            attn_dists: List length beam_size containing lists length attn_length.
+            p_gens: Generation probabilities for this step. A list length beam_size. List of None if in baseline mode.
+        '''
+
+        beam_size = len(dec_in_states)
+
+        new_c = np.concatenate([np.expand_dims(state.c, axis=0) for state in dec_in_states], axis=0)
+        new_h = np.concatenate([np.expand_dims(state.h, axis=0) for state in dec_in_states], axis=0)
+        new_dec_in_state = tf.contrib.rnn.LSTMStateTuple(new_c, new_h)
+
+        feed_dict = {
+            self.__enc_pad_mask: batch.enc_pad_mask,
+            self.__enc_batch_ext_vocab: batch.enc_batch_ext_vocab,
+            self.__max_n_oov: batch.max_n_oov,
+            self.__enc_outputs: enc_states,
+            self.__dec_batch: np.transpose([latest_tokens]),
+            self.__dec_in_state: new_dec_in_state
+        }
+
+        rets = {
+            'ids': self.__top_k_ids,
+            'probs': self.__top_k_probs,
+            'states': self.__dec_out_state,
+            'attn_dists': self.__attn_dists,
+            'p_gens': self.__p_gens
+        }
+
+        result = sess.run(rets, feed_dict=feed_dict)
+
+        assert len(result['attn_dists']) == 1
+        assert len(result['p_gens']) == 1
+
+        dec_out_states = [tf.contrib.rnn_cell.LSTMStateTuple(result['states'].c[i], result['states'].h[i]) for i in range(beam_size)]
+        attn_dists = result['attn_dists'][0].tolist()
+        p_gens = result['p_gens'][0].tolist()
+
+        return result['ids'], result['probs'], dec_out_states, attn_dists, p_gens
+
+    def load_embs(self, sess, emb):
+        sess.run(self.__load_embs, feed_dict={self.__embs: emb})

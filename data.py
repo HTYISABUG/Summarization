@@ -1,6 +1,9 @@
 import glob, random, struct
 
 import tensorflow as tf
+import numpy as np
+
+from gensim.models import KeyedVectors
 
 _SENTENCE_START = '<s>'
 _SENTENCE_END   = '</s>'
@@ -12,44 +15,66 @@ STOP_TOKEN      = 'STOP'
 
 class Vocab(object):
 
-    def __init__(self, vocab_file, vocab_size):
+    def __init__(self, vocab_file, vocab_size, emb_dim):
         self.__word2id = {}
         self.__id2word = {}
 
         cnt = 0
 
-        for w in [_PAD_TOKEN, _UNKNOWN_TOKEN, _START_TOKEN, _STOP_TOKEN]:
+        wv = KeyedVectors.load_word2vec_format('./word2vec/GoogleNews-vectors-negative300.bin', binary=True)
+        wv_dim = wv[PAD_TOKEN].shape[0]
+
+        self.embedding = np.zeros((vocab_size, emb_dim), dtype=np.float32)
+
+        for w in [PAD_TOKEN, UNKNOWN_TOKEN, START_TOKEN, STOP_TOKEN]:
             self.__word2id[w] = cnt
             self.__id2word[cnt] = w
+
+            if wv_dim < emb_dim:
+                self.embedding[cnt][:wv_dim] = wv[w]
+            else:
+                self.embedding[cnt] = wv[w][:emb_dim]
+
             cnt += 1
 
         with open(vocab_file, 'r') as fp:
             for line in fp:
                 pieces = line.split()
 
-                if len(pieces) != 2: print('Warning: incorrectly formatted line in vocabulary file: %s\n' % line)
+                if len(pieces) != 2:
+                    print('Warning: skip incorrectly formatted line in vocabulary file: %s\n' % line)
+                    continue
 
                 w = pieces[0]
 
-                if w in [_SENTENCE_START, _SENTENCE_END, _PAD_TOKEN, _UNKNOWN_TOKEN, _START_TOKEN, _STOP_TOKEN]:
+                if w in [_SENTENCE_START, _SENTENCE_END, PAD_TOKEN, UNKNOWN_TOKEN, START_TOKEN, STOP_TOKEN]:
                     raise Exception('<s>, </s>, UNK, PAD, START and STOP shouldn\'t be in the vocab file, but %s is' % w)
                 elif w in self.__word2id:
                     raise Exception('Duplicated word in vocabulary file: %s' % w)
+                elif w not in wv.vocab:
+                    continue
 
                 self.__word2id[w] = cnt
                 self.__id2word[cnt] = w
+
+                if wv_dim < emb_dim:
+                    self.embedding[cnt][:wv_dim] = wv[w]
+                else:
+                    self.embedding[cnt] = wv[w][:emb_dim]
+
                 cnt += 1
 
-                if max_size != 0 and self._count >= max_size:
-                    print('max_size of vocab was specified as %i; we now have %i words. Stopping reading.' % (vocab_size, cnt))
+                if vocab_size != 0 and cnt >= vocab_size:
+                    print('size of vocab was specified as %i; we now have %i words. Stopping reading.' % (vocab_size, cnt))
                     break
 
             self.__size = cnt
+            self.embedding = self.embedding[:cnt]
 
-            print('Finished constructing vocabulary of %i total words. Last word added: %s') % (cnt, self.__id2word[cnt-1])
+            print('Finished constructing vocabulary of %i total words. Last word added: %s' % (cnt, self.__id2word[cnt-1]))
 
     def w2i(self, w):
-        return self.__word2id[w if w in self.__word2id else _UNKNOWN_TOKEN]
+        return self.__word2id[w if w in self.__word2id else UNKNOWN_TOKEN]
 
     def i2w(self, i):
         if i not in self.__id2word:
@@ -73,7 +98,7 @@ def article2ids(article_words, vocab):
 
     ids = []
     oovs = []
-    unk_id = vocab.w2i(_UNKNOWN_TOKEN)
+    unk_id = vocab.w2i(UNKNOWN_TOKEN)
 
     for w in article_words:
         id_ = vocab.w2i(w)
@@ -102,10 +127,10 @@ def abstract2ids(abstract_words, vocab, article_oovs):
     """
 
     ids = []
-    unk_id = vocab.w2i(_UNKNOWN_TOKEN)
+    unk_id = vocab.w2i(UNKNOWN_TOKEN)
 
     for w in abstract_words:
-        i = vocab.w2i[w]
+        i = vocab.w2i(w)
 
         if i == unk_id: # if w is an OOV word
             if w in article_oovs: # If w is an in-article OOV
@@ -118,7 +143,7 @@ def abstract2ids(abstract_words, vocab, article_oovs):
 
     return ids
 
-def output2words(self, ids, vocab, article_oovs):
+def output2words(ids, vocab, article_oovs):
     """ Maps output ids to words, including mapping in-article OOVs from their temporary ids to the original OOV string (applicable in pointer-generator mode).
 
     Args:
@@ -148,7 +173,7 @@ def output2words(self, ids, vocab, article_oovs):
 
     return words
 
-def abstract2sens(self, abstract):
+def abstract2sens(abstract):
     """ Splits abstract text from datafile into list of sentences.
 
     Args:
@@ -195,10 +220,10 @@ def tf_example_generator(data_path, single_pass):
         for f in filelist:
             with open(f, 'rb') as fp:
                 while True:
-                    str_len = reader.read(8) # paper write string length with type long long (size 8 bytes)
-                    if not byte_length: break
+                    str_len = fp.read(8) # paper write string length with type long long (size 8 bytes)
+                    if not str_len: break
                     str_len = struct.unpack('q', str_len)[0]
-                    example_str = struct.unpack('%ds' % (str_len), reader.read(str_len))[0]
+                    example_str = struct.unpack('%ds' % (str_len), fp.read(str_len))[0]
                     yield tf.train.Example.FromString(example_str)
 
         if single_pass:

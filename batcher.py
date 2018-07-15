@@ -2,6 +2,7 @@ import queue, random, time
 from threading import Thread
 
 import numpy as np
+import tensorflow as tf
 
 import data
 
@@ -68,7 +69,7 @@ class Batcher(object):
 
         while True:
             try:
-                article, abstract = text_gen.next()
+                article, abstract = next(text_gen)
             except StopIteration:
                 tf.logging.info("The tf example generator for this example queue filling thread has exhausted data.")
 
@@ -79,17 +80,17 @@ class Batcher(object):
                 else:
                     raise Exception("single_pass mode is off but the example generator is out of data; error.")
 
-            abstract_sens = [sen.strip() for sen in data.abstract2sen(abstract)]
+            abstract_sens = [sen.strip() for sen in data.abstract2sens(abstract)]
             example = Example(article, abstract_sens, self.__vocab, self.__hps)
             self.__example_queue.put(example)
 
     def __text_generator(self, tf_example_generator):
         while True:
-            e = tf_example_generator.next()
+            e = next(tf_example_generator)
 
             try:
-                article = e.features.feature['article'].bytes_list.value[0]
-                abstract = e.features.feature['abstract'].bytes_list.value[0]
+                article = e.features.feature['article'].bytes_list.value[0].decode()
+                abstract = e.features.feature['abstract'].bytes_list.value[0].decode()
             except ValueError:
                 tf.logging.error('Failed to get article or abstract from example')
                 continue
@@ -100,6 +101,7 @@ class Batcher(object):
                 yield article, abstract
 
     def __fill_batch_queue(self):
+
         """Takes Examples out of queue, sorts them by encoder sequence length, processes into Batches and places them in the batch queue.
 
         In decode mode, makes batches that each contain a single example repeated.
@@ -114,7 +116,7 @@ class Batcher(object):
                 inputs.sort(key=lambda input_: input_.enc_len)
 
                 # Group the sorted examples in to batches, and push into batch queue
-                batches = [inputs[i:i+hps.batch_size] for idx in range(0, len(inputs), hps.batch_size)]
+                batches = [inputs[i:i+hps.batch_size] for i in range(0, len(inputs), hps.batch_size)]
 
                 if not self.__single_pass:
                     random.shuffle(batches)
@@ -233,7 +235,7 @@ class Example(object):
             self.enc_input_ext_vocab.append(pad_id)
 
     def pad_dec_input_target(self, max_len, pad_id):
-        while len(self.dec_input) < maxlen:
+        while len(self.dec_input) < max_len:
             self.dec_input.append(pad_id)
 
         while len(self.dec_target) < max_len:
@@ -276,7 +278,7 @@ class Batch(object):
         # Initialize the numpy arrays
         self.enc_batch = np.zeros([hps.batch_size, max_enc_len], dtype=np.int32)
         self.enc_lens = np.zeros([hps.batch_size], dtype=np.int32)
-        self.enc_pad_mask = np.zeros([hps.batch_size, max_enc_len], dtype=np.bool)
+        self.enc_pad_mask = np.zeros([hps.batch_size, max_enc_len], dtype=np.float32)
         self.enc_batch_ext_vocab = np.zeros([hps.batch_size, max_enc_len], dtype=np.int32)
 
         # Fill in the numpy arrays
@@ -305,7 +307,7 @@ class Batch(object):
             e.pad_dec_input_target(hps.max_dec_steps, self.__pad_id)
 
         self.dec_batch = np.zeros([hps.batch_size, hps.max_dec_steps], dtype=np.int32)
-        self.dec_pad_mask = np.zeros([hps.batch_size, hps.max_dec_steps], dtype=np.bool)
+        self.dec_pad_mask = np.zeros([hps.batch_size, hps.max_dec_steps], dtype=np.float32)
         self.target_batch = np.zeros([hps.batch_size, hps.max_dec_steps], dtype=np.int32)
 
         for i, e in enumerate(examples):
