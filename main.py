@@ -1,10 +1,9 @@
-import os, time
+import os, time, sys
 from pprint import pprint
 from collections import namedtuple
 
 import tensorflow as tf
 import numpy as np
-from tensorflow.python import debug as tfdbg
 
 from data import Vocab
 from batcher import Batcher
@@ -32,7 +31,6 @@ tf.app.flags.DEFINE_float('rand_unif_init_mag', 0.02, 'magnitude for lstm cells 
 tf.app.flags.DEFINE_float('trun_norm_init_std', 1e-4, 'std of truncated normal initializer')
 tf.app.flags.DEFINE_float('max_grad_norm',      2.0,  'for gradient clipping')
 
-tf.app.flags.DEFINE_boolean('debug', False, "Run in tensorflow's debug mode (watches for NaN/inf values)")
 tf.app.flags.DEFINE_boolean('single_pass', False, 'For decode mode only. If True, run eval on the full dataset using a fixed checkpoint, i.e. take the current checkpoint, and use it to produce one summary for each example in the dataset, write the summaries to file and then get ROUGE scores for the whole dataset. If False (default), run concurrent decoding, i.e. repeatedly load latest checkpoint, use it to produce summaries for randomly-chosen examples and log the results to screen, indefinitely.')
 tf.app.flags.DEFINE_boolean('restore_best_model', False, 'Restore the best model in the eval dir and save it in the train dir, ready to be used for further training. Useful for early stopping, or if your training checkpoint has become corrupted with e.g. NaN values.')
 
@@ -45,22 +43,17 @@ def run_training(model, batcher, emb):
 
     model.build()
 
-    saver = tf.train.Saver()
-    sv = tf.train.Supervisor(logdir=train_dir, saver=saver, global_step=model.global_step)
-
-    tf.logging.info('Preparing or waiting for session...')
-
-    sess_context_manager = sv.prepare_or_wait_for_session(config=get_config())
-
-    tf.logging.info('Created session.')
+    if FLAGS.restore_best_model: restore_best_model()
 
     try:
-        with sess_context_manager as sess:
-            if FLAGS.debug:
-                sess = tfdbg.LocalCLIDebugWrapperSession(sess)
-                sess.add_tensor_filter('has_inf_or_nan', tfdbg.has_inf_or_nan)
+        sess_params = {
+            'checkpoint_dir': train_dir,
+            'config': get_config(),
+            'hooks': model.sess_hooks
+        }
 
-            model.load_embs(sess, emb)
+        with tf.train.MonitoredTrainingSession(**sess_params) as sess:
+            model.load_embs(sess._tf_sess(), emb)
 
             tf.logging.info('starting run_training')
 
@@ -76,20 +69,44 @@ def run_training(model, batcher, emb):
 
                 tf.logging.info('loss: %f', result['loss'])
 
-                if not np.isfinite(result['loss']):
-                    raise Exception('Loss is not finite. Stopping.')
-
-                if result['global_step'] % 100 == 0:
-                    sv.summary_writer.flush()
-
     except KeyboardInterrupt as e:
         tf.logging.info('Caught keyboard interrupt on worker. Stopping supervisor...')
-        sv.stop()
 
 def get_config():
     config = tf.ConfigProto(allow_soft_placement=True)
     config.gpu_options.allow_growth = True
     return config
+
+def restore_best_model():
+
+    '''Load bestmodel file from eval directory, add variables for adagrad, and save to train directory'''
+
+    tf.logging.info('Restoring bestmodel for training...')
+
+    with tf.Session(config=get_config()) as sess:
+        tf.logging.info('Initializing all variables...')
+
+        sess.run(tf.global_variables_initializer())
+
+        saver = tf.train.Saver([var for var in tf.all_variables() if 'Adagrad' not in var.name])
+
+        tf.logging.info('Restoring all non-adagrad variables from best model in eval dir...')
+
+        cur_ckpt = load_ckpt(sess, saver, 'eval')
+
+        tf.logging.info('Restore %s.' % (cur_ckpt))
+
+        new_model_name = cur_ckpt.split('/')[-1].replace('bestmodel', 'model')
+        new_path = os.path.join(FLAGS.log_root, 'train', new_model_name)
+
+        tf.logging.info('Saving model to %s...' % (new_path))
+
+        new_saver = tf.train.Saver()
+        new_saver.save(sess, new_path)
+
+        tf.logging.info('Saved.')
+
+        sys.exit()
 
 def run_eval(model, batcher):
 
@@ -101,38 +118,38 @@ def run_eval(model, batcher):
 
     model.build()
 
-    sess = tf.Session(config=get_config())
-    saver = tf.train.Saver()
-    writer = tf.summary.FileWriter(eval_dir)
+    with tf.Session(config=get_config()) as sess:
+        saver = tf.train.Saver()
+        writer = tf.summary.FileWriter(eval_dir)
 
-    running_avg_loss = 0 # the eval job keeps a smoother, running average loss to tell it when to implement early stopping
-    best_loss = None  # will hold the best loss achieved so far
+        running_avg_loss = 0 # the eval job keeps a smoother, running average loss to tell it when to implement early stopping
+        best_loss = None  # will hold the best loss achieved so far
 
-    while True:
-        load_ckpt(sess, saver)
+        while True:
+            load_ckpt(sess, saver)
 
-        batch = batcher.next_batch()
+            batch = batcher.next_batch()
 
-        ts = time.time()
-        result = model.run_eval_step(sess, batch)
-        tf.logging.info('seconds for batch: %.2f', time.time() - ts)
+            ts = time.time()
+            result = model.run_eval_step(sess, batch)
+            tf.logging.info('seconds for batch: %.2f', time.time() - ts)
 
-        tf.logging.info('loss: %f', result['loss'])
+            tf.logging.info('loss: %f', result['loss'])
 
-        summary = result['summary']
-        global_step = result['global_step']
-        writer.add_summary(summary, global_step)
+            summary = result['summary']
+            global_step = result['global_step']
+            writer.add_summary(summary, global_step)
 
-        running_avg_loss = calc_running_avg_loss(running_avg_loss, np.asscalar(loss), writer, global_step)
+            running_avg_loss = calc_running_avg_loss(running_avg_loss, np.asscalar(loss), writer, global_step)
 
-        if best_loss is None or running_avg_loss < bestmodel_path:
-            tf.logging.info('Found new best model with %.3f running_avg_loss. Saving to %s', running_avg_loss, bestmodel_path)
+            if best_loss is None or running_avg_loss < bestmodel_path:
+                tf.logging.info('Found new best model with %.3f running_avg_loss. Saving to %s', running_avg_loss, bestmodel_path)
 
-            saver.save(sess, bestmodel_path, global_step=global_step, latest_filename='best.ckpt')
-            best_loss = running_avg_loss
+                saver.save(sess, bestmodel_path, global_step=global_step, latest_filename='best.ckpt')
+                best_loss = running_avg_loss
 
-        if global_step % 100 == 0:
-            writer.flush()
+            if global_step % 100 == 0:
+                writer.flush()
 
 def load_ckpt(sess, saver, ckpt_dir='train'):
 
@@ -146,6 +163,8 @@ def load_ckpt(sess, saver, ckpt_dir='train'):
             saver.restore(sess, ckpt_state.model_checkpoint_path)
 
             tf.logging.info('Loading checkpoint %s', ckpt_state.model_checkpoint_path)
+
+            return ckpt_state.model_checkpoint_path
         except:
             tf.logging.info('Failed to load checkpoint from %s. Sleeping for %i secs...', ckpt_dir, 10)
 

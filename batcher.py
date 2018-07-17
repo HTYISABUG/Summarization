@@ -203,10 +203,14 @@ class Example(object):
         self.enc_input_ext_vocab, self.article_oovs = data.article2ids(article_words, vocab)
 
         ## Get a verison of the reference summary where in-article OOVs are represented by their temporary article OOV id
+        abs_ids = [vocab.w2i(w) for w in abstract_words]
+
+        self.dec_input, _ = self.__get_dec_input_target_seqs(abs_ids, hps.max_dec_steps, start_id, stop_id)
+        self.dec_len = len(self.dec_input)
+
         abs_ids_ext_vocab = data.abstract2ids(abstract_words, vocab, self.article_oovs)
 
-        self.dec_input, self.dec_target = self.__get_dec_input_target_seqs(abs_ids_ext_vocab, hps.max_dec_steps, start_id, stop_id)
-        self.dec_len = len(self.dec_input)
+        _, self.dec_target = self.__get_dec_input_target_seqs(abs_ids_ext_vocab, hps.max_dec_steps, start_id, stop_id)
 
         # origin backup
         self.origin_article = article
@@ -286,7 +290,7 @@ class Batch(object):
             self.enc_batch[i] = e.enc_input
             self.enc_lens[i] = e.enc_len
             self.enc_pad_mask[i][:e.enc_len] = 1
-            self.enc_batch_ext_vocab = e.enc_input_ext_vocab
+            self.enc_batch_ext_vocab[i] = e.enc_input_ext_vocab
 
         self.max_n_oov = max([len(e.article_oovs) for e in examples])
         self.article_oovs = [e.article_oovs for e in examples]

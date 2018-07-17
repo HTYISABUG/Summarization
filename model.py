@@ -15,7 +15,7 @@ class Model(object):
 
         ts = time.time()
 
-        self.global_step = tf.Variable(0, name='global_step', trainable=False)
+        self.global_step = tf.train.get_or_create_global_step()
 
         # encoder
         self.__enc_batch = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch') # word ids
@@ -34,7 +34,7 @@ class Model(object):
 
         self.__build_seq2seq()
 
-        self.__summary = tf.summary.merge_all()
+        self.sess_hooks = [tf.train.NanTensorHook(self.__loss)]
 
         tf.logging.info('Time to build graph: %i seconds', time.time() - ts)
 
@@ -72,6 +72,7 @@ class Model(object):
         self.__p_gens = p_gens
         self.__loss = loss
         self.__train_op = train_op
+        self.__summary = tf.summary.merge_all()
 
     def __build_embedding(self):
         hps = self.__hps
@@ -126,8 +127,8 @@ class Model(object):
             encoder_c = tf.concat([fw_stat.c, bw_stat.c], axis=1)
             encoder_h = tf.concat([fw_stat.h, bw_stat.h], axis=1)
 
-            decoder_c = tf.layers.dense(encoder_c, hps.hidden_dim, activation=tf.nn.relu)
-            decoder_h = tf.layers.dense(encoder_h, hps.hidden_dim, activation=tf.nn.relu)
+            decoder_c = tf.layers.dense(encoder_c, hps.hidden_dim, activation=tf.nn.relu, name='dec_state_c')
+            decoder_h = tf.layers.dense(encoder_h, hps.hidden_dim, activation=tf.nn.relu, name='dec_state_h')
 
             return tf.contrib.rnn.LSTMStateTuple(decoder_c, decoder_h)
 
@@ -149,7 +150,7 @@ class Model(object):
 
         hps = self.__hps
 
-        with tf.variable_scope('decoder'):
+        with tf.variable_scope('attention_decoder'):
             cell = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.rand_unif_init, state_is_tuple=True)
 
             with tf.variable_scope('attention'):
@@ -172,20 +173,21 @@ class Model(object):
             state = zero_state.clone(cell_state=state)
 
             for i, input_ in enumerate(inputs):
-                tf.logging.info("Adding attention decoder timestep %i of %i", i, len(inputs))
+                tf.logging.info("Adding attention decoder timestep %i of %i", i + 1, len(inputs))
 
                 context_vector, state = attention_wrapper(input_, state)
 
-                cell_state = state.cell_state
-                output = tf.layers.dense(tf.concat([context_vector, cell_state.c, cell_state.h], axis=1), hps.hidden_dim)
-                outputs.append(output)
-                attn_dists.append(state.alignments)
+                with tf.variable_scope('decoder'):
+                    cell_state = state.cell_state
+                    output_feature = tf.concat([context_vector, cell_state.c, cell_state.h], axis=1)
+                    output = tf.layers.dense(output_feature, hps.hidden_dim, name='output')
+                    outputs.append(output)
+                    attn_dists.append(state.alignments)
 
-                with tf.variable_scope('p_gen'):
                     p_gen_feature = tf.concat([context_vector, cell_state.c, cell_state.h, input_], axis=1)
-                    p_gen = tf.layers.dense(p_gen_feature, 1, activation=tf.nn.softmax)
+                    p_gen = tf.layers.dense(p_gen_feature, 1, activation=tf.nn.sigmoid, name='p_gen')
 
-                p_gens.append(p_gen)
+                    p_gens.append(p_gen)
 
             return outputs, state.cell_state, attn_dists, p_gens
 
@@ -193,7 +195,7 @@ class Model(object):
         hps = self.__hps
 
         with tf.variable_scope('vocab_distribution'):
-            return [tf.layers.dense(input_, hps.vocab_size, activation=tf.nn.softmax) for input_ in inputs]
+            return [tf.layers.dense(input_, hps.vocab_size, activation=tf.nn.softmax, reuse=tf.AUTO_REUSE) for input_ in inputs]
 
     def __build_final_distribution(self, vocab_dists, attn_dists, p_gens):
 
@@ -227,7 +229,7 @@ class Model(object):
             shape = [hps.batch_size, ext_vocab_size]
             proj_attn_dists = [tf.scatter_nd(indices, attn_dist, shape) for attn_dist in attn_dists]
 
-            return [vocab_dist + attn_dist for vocab_dist, attn_dist in zip(vocab_dists, proj_attn_dists)]
+            return [vocab_dist + attn_dist for vocab_dist, attn_dist in zip(ext_vocab_dists, proj_attn_dists)]
 
     def __build_loss(self, final_dists):
         hps = self.__hps
