@@ -320,6 +320,6 @@ class Batch(object):
             self.target_batch[i] = e.dec_target
 
     def __store_origin(self, examples):
-        self.__origin_articles = [e.origin_article for e in examples]
-        self.__origin_abstract = [e.origin_abstract for e in examples]
-        self.__origin_abstract_sens = [e.origin_abstract_sens for e in examples]
+        self.origin_articles = [e.origin_article for e in examples]
+        self.origin_abstracts = [e.origin_abstract for e in examples]
+        self.origin_abstract_sens = [e.origin_abstract_sens for e in examples]

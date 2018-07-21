@@ -332,7 +332,7 @@ class Model(object):
 
         return enc_outputs, dec_in_state
 
-    def run_decode_once(self, batch, latest_tokens, enc_states, dec_in_states):
+    def run_decode_once(self, sess, batch, latest_tokens, enc_states, dec_in_states):
 
         '''For beam search decoding. Run the decoder for one step.
 

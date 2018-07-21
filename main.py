@@ -5,9 +5,11 @@ from collections import namedtuple
 import tensorflow as tf
 import numpy as np
 
+import util
 from data import Vocab
 from batcher import Batcher
 from model import Model
+from beam_search_decoder import BeamSearchDecoder
 
 FLAGS = tf.app.flags.FLAGS
 
@@ -22,8 +24,10 @@ tf.app.flags.DEFINE_integer('hidden_dim',    256,   'dimension of RNN hidden sta
 tf.app.flags.DEFINE_integer('batch_size',    16,    'batch size')
 tf.app.flags.DEFINE_integer('emb_dim',       300,   'dimension of word embeddings')
 tf.app.flags.DEFINE_integer('max_enc_steps', 400,   'max timesteps of encoder (max source text tokens)')
+tf.app.flags.DEFINE_integer('min_dec_steps', 35,    'Minimum sequence length of generated summary. Applies only for beam search mode')
 tf.app.flags.DEFINE_integer('max_dec_steps', 100,   'max timesteps of decoder (max summary tokens)')
 tf.app.flags.DEFINE_integer('vocab_size',    50000, 'size of vocabulary')
+tf.app.flags.DEFINE_integer('beam_size',     4,     'beam size for beam search decoding.')
 
 tf.app.flags.DEFINE_float('lr',                 0.15, 'learning rate')
 tf.app.flags.DEFINE_float('adagrad_init_acc',   0.1,  'initial accumulator value for Adagrad')
@@ -48,7 +52,7 @@ def run_training(model, batcher, emb):
     try:
         sess_params = {
             'checkpoint_dir': train_dir,
-            'config': get_config(),
+            'config': util.get_config(),
             'hooks': model.sess_hooks
         }
 
@@ -72,18 +76,13 @@ def run_training(model, batcher, emb):
     except KeyboardInterrupt as e:
         tf.logging.info('Caught keyboard interrupt on worker. Stopping supervisor...')
 
-def get_config():
-    config = tf.ConfigProto(allow_soft_placement=True)
-    config.gpu_options.allow_growth = True
-    return config
-
 def restore_best_model():
 
     '''Load bestmodel file from eval directory, add variables for adagrad, and save to train directory'''
 
     tf.logging.info('Restoring bestmodel for training...')
 
-    with tf.Session(config=get_config()) as sess:
+    with tf.Session(config=util.get_config()) as sess:
         tf.logging.info('Initializing all variables...')
 
         sess.run(tf.global_variables_initializer())
@@ -92,7 +91,7 @@ def restore_best_model():
 
         tf.logging.info('Restoring all non-adagrad variables from best model in eval dir...')
 
-        cur_ckpt = load_ckpt(sess, saver, 'eval')
+        cur_ckpt = util.load_ckpt(sess, saver, 'eval')
 
         tf.logging.info('Restore %s.' % (cur_ckpt))
 
@@ -118,7 +117,7 @@ def run_eval(model, batcher):
 
     model.build()
 
-    with tf.Session(config=get_config()) as sess:
+    with tf.Session(config=util.get_config()) as sess:
         saver = tf.train.Saver()
         writer = tf.summary.FileWriter(eval_dir)
 
@@ -126,7 +125,7 @@ def run_eval(model, batcher):
         best_loss = None  # will hold the best loss achieved so far
 
         while True:
-            load_ckpt(sess, saver)
+            util.load_ckpt(sess, saver)
 
             batch = batcher.next_batch()
 
@@ -150,25 +149,6 @@ def run_eval(model, batcher):
 
             if global_step % 100 == 0:
                 writer.flush()
-
-def load_ckpt(sess, saver, ckpt_dir='train'):
-
-    '''Load checkpoint from the ckpt_dir and restore it to saver and sess, waiting 10 secs in the case of failure.'''
-
-    while True:
-        try:
-            ckpt_dir = os.path.join(FLAGS.log_root, ckpt_dir)
-            latest_filename = 'best.ckpt' if ckpt_dir == 'eval' else None
-            ckpt_state = tf.train.get_checkpoint_state(ckpt_dir, latest_filename=latest_filename)
-            saver.restore(sess, ckpt_state.model_checkpoint_path)
-
-            tf.logging.info('Loading checkpoint %s', ckpt_state.model_checkpoint_path)
-
-            return ckpt_state.model_checkpoint_path
-        except:
-            tf.logging.info('Failed to load checkpoint from %s. Sleeping for %i secs...', ckpt_dir, 10)
-
-            time.sleep(10)
 
 def calc_running_avg_loss(running_avg_loss, loss, writer, step, decay=0.99):
 
@@ -223,6 +203,9 @@ def main(unused_args):
     for k, v in FLAGS.__flags.items():
         if k in hps_name: hps[k] = v.value
 
+    if FLAGS.mode == 'decode':
+        hps['max_dec_steps'] = 1
+
     hps = namedtuple('HyperParams', hps.keys())(**hps)
 
     batcher = Batcher(FLAGS.data_path, vocab, hps, FLAGS.single_pass)
@@ -236,7 +219,9 @@ def main(unused_args):
         model = Model(hps)
         run_eval(model, batcher)
     elif FLAGS.mode == 'decode':
-        hps['max_dec_steps'] = 1
+        model = Model(hps)
+        decoder = BeamSearchDecoder(model, batcher, vocab)
+        decoder.decode()
     else:
         raise ValueError("The 'mode' flag must be one of train/eval/decode")
 

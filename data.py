@@ -5,8 +5,8 @@ import numpy as np
 
 from gensim.models import KeyedVectors
 
-_SENTENCE_START = '<s>'
-_SENTENCE_END   = '</s>'
+SENTENCE_START = '<s>'
+SENTENCE_END   = '</s>'
 
 PAD_TOKEN       = 'PAD'
 UNKNOWN_TOKEN   = 'UNK'
@@ -47,7 +47,7 @@ class Vocab(object):
 
                 w = pieces[0]
 
-                if w in [_SENTENCE_START, _SENTENCE_END, PAD_TOKEN, UNKNOWN_TOKEN, START_TOKEN, STOP_TOKEN]:
+                if w in [SENTENCE_START, SENTENCE_END, PAD_TOKEN, UNKNOWN_TOKEN, START_TOKEN, STOP_TOKEN]:
                     raise Exception('<s>, </s>, UNK, PAD, START and STOP shouldn\'t be in the vocab file, but %s is' % w)
                 elif w in self.__word2id:
                     raise Exception('Duplicated word in vocabulary file: %s' % w)
@@ -81,11 +81,13 @@ class Vocab(object):
             raise ValueError('Id not found in vocab: %d' % i)
         return self._id_to_word[word_id]
 
+    @property
     def size(self):
         return self.__size
 
 def article2ids(article_words, vocab):
-    """Map the article words to their ids. Also return a list of OOVs in the article.
+
+    '''Map the article words to their ids. Also return a list of OOVs in the article.
 
     Args:
         article_words: list of words (strings)
@@ -94,7 +96,7 @@ def article2ids(article_words, vocab):
     Returns:
         ids: A list of word ids (integers); OOVs are represented by their temporary article OOV number.
         oovs: A list of the OOV words in the article (strings), in the order corresponding to their temporary article OOV numbers.
-    """
+    '''
 
     ids = []
     oovs = []
@@ -108,14 +110,15 @@ def article2ids(article_words, vocab):
                 oovs.append(w)
 
             oov_idx = oovs.index(w)
-            ids.append(vocab.size() + oov_idx)
+            ids.append(vocab.size + oov_idx)
         else:
             ids.append(id_)
 
     return ids, oovs
 
 def abstract2ids(abstract_words, vocab, article_oovs):
-    """ Map the abstract words to their ids. In-article OOVs are mapped to their temporary OOV numbers.
+
+    ''' Map the abstract words to their ids. In-article OOVs are mapped to their temporary OOV numbers.
 
     Args:
         abstract_words: list of words (strings)
@@ -124,7 +127,7 @@ def abstract2ids(abstract_words, vocab, article_oovs):
 
     Returns:
         ids: List of ids (integers). In-article OOV words are mapped to their temporary OOV numbers. Out-of-article OOV words are mapped to the UNK token id.
-    """
+    '''
 
     ids = []
     unk_id = vocab.w2i(UNKNOWN_TOKEN)
@@ -134,7 +137,7 @@ def abstract2ids(abstract_words, vocab, article_oovs):
 
         if i == unk_id: # if w is an OOV word
             if w in article_oovs: # If w is an in-article OOV
-                tid = vocab.size() + article_oovs.index(w)
+                tid = vocab.size + article_oovs.index(w)
                 ids.append(tid)
             else: # If w is an out-of-article OOV
                 ids.append(unk_id)
@@ -144,7 +147,8 @@ def abstract2ids(abstract_words, vocab, article_oovs):
     return ids
 
 def output2words(ids, vocab, article_oovs):
-    """ Maps output ids to words, including mapping in-article OOVs from their temporary ids to the original OOV string (applicable in pointer-generator mode).
+
+    ''' Maps output ids to words, including mapping in-article OOVs from their temporary ids to the original OOV string (applicable in pointer-generator mode).
 
     Args:
         ids: list of ids (integers)
@@ -153,7 +157,7 @@ def output2words(ids, vocab, article_oovs):
 
     Returns:
         words: list of words (strings)
-    """
+    '''
 
     words = []
 
@@ -162,7 +166,7 @@ def output2words(ids, vocab, article_oovs):
             w = vocab.i2w(i)
         except ValueError as e:
             assert article_oovs is not None, "Error: model produced a word ID that isn't in the vocabulary."
-            article_oovs_idx = i - vocab.size()
+            article_oovs_idx = i - vocab.size
 
             try:
                 w = article_oovs[article_oovs_idx]
@@ -174,29 +178,31 @@ def output2words(ids, vocab, article_oovs):
     return words
 
 def abstract2sens(abstract):
-    """ Splits abstract text from datafile into list of sentences.
+
+    ''' Splits abstract text from datafile into list of sentences.
 
     Args:
         abstract: string containing <s> and </s> tags for starts and ends of sentences
 
     Returns:
         sens: List of sentence strings (no tags)
-    """
+    '''
 
     cnt = 0
     sens = []
 
     while True:
         try:
-            start = abstract.index(_SENTENCE_START, cnt)
-            end = abstract.index(_SENTENCE_END, start + 1)
-            cnt = end + len(_SENTENCE_END)
-            sens.append(abstract[start+len(_SENTENCE_START):end])
+            start = abstract.index(SENTENCE_START, cnt)
+            end = abstract.index(SENTENCE_END, start + 1)
+            cnt = end + len(SENTENCE_END)
+            sens.append(abstract[start+len(SENTENCE_START):end])
         except ValueError as e:
             return sens
 
 def tf_example_generator(data_path, single_pass):
-    """Generates tf.Examples from data files.
+
+    '''Generates tf.Examples from data files.
 
         Binary data format: <length><blob>. <length> represents the byte size of <blob>.
         <blob> is serialized tf.Example proto.
@@ -208,7 +214,7 @@ def tf_example_generator(data_path, single_pass):
 
     Yields:
         Deserialized tf.Example.
-    """
+    '''
 
     while True:
         filelist = glob.glob(data_path) # get the list of datafiles
@@ -229,3 +235,43 @@ def tf_example_generator(data_path, single_pass):
         if single_pass:
             print('tf_example_generator completed reading all datafiles. No more data.')
             break
+
+def highlight_art_oovs(article, vocab):
+
+    '''Returns the article string, highlighting the OOVs by placing __underscores__ around them'''
+
+    unk_id = vocab.w2i(UNKNOWN_TOKEN)
+    words = article.split()
+    words = [('__%s__' % (w)) if vocab.w2i(w) == unk_id else w for w in words]
+    rets = ' '.join(words)
+    return rets
+
+def highlight_abs_oovs(abstract, vocab, article_oovs):
+
+    '''Returns the abstract string, highlighting the article OOVs with __underscores__.
+
+    If a list of article_oovs is provided, non-article OOVs are differentiated like !!__this__!!.
+
+    Args:
+        abstract: string
+        vocab: Vocabulary object
+        article_oovs: list of words (strings)
+    '''
+
+    unk_id = vocab.w2i(UNKNOWN_TOKEN)
+
+    words = abstract.split()
+    new_words = []
+
+    for w in words:
+        if vocab.w2i(w) == unk_id:
+            if w in article_oovs:
+                new_words.append('__%s__' % (w))
+            else:
+                new_words.append('!!__%s__!!' % (w))
+        else:
+            new_words.append(w)
+
+    rets = ' '.join(new_words)
+
+    return rets
