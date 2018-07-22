@@ -112,7 +112,6 @@ def run_eval(model, batcher):
     '''Repeatedly runs eval iterations, logging to screen and writing summaries. Saves the model with the best loss seen so far.'''
 
     eval_dir = os.path.join(FLAGS.log_root, 'eval')
-    if not os.path.exists(train_dir): os.makedirs(eval_dir)
     bestmodel_path = os.path.join(eval_dir, 'bestmodel')
 
     model.build()
@@ -133,7 +132,8 @@ def run_eval(model, batcher):
             result = model.run_eval_step(sess, batch)
             tf.logging.info('seconds for batch: %.2f', time.time() - ts)
 
-            tf.logging.info('loss: %f', result['loss'])
+            loss = result['loss']
+            tf.logging.info('loss: %f', loss)
 
             summary = result['summary']
             global_step = result['global_step']
@@ -141,7 +141,7 @@ def run_eval(model, batcher):
 
             running_avg_loss = calc_running_avg_loss(running_avg_loss, np.asscalar(loss), writer, global_step)
 
-            if best_loss is None or running_avg_loss < bestmodel_path:
+            if best_loss is None or running_avg_loss < best_loss:
                 tf.logging.info('Found new best model with %.3f running_avg_loss. Saving to %s', running_avg_loss, bestmodel_path)
 
                 saver.save(sess, bestmodel_path, global_step=global_step, latest_filename='best.ckpt')
@@ -171,7 +171,7 @@ def calc_running_avg_loss(running_avg_loss, loss, writer, step, decay=0.99):
 
     loss_sum = tf.Summary()
     tag_name = 'running_avg_loss/decay=%f' % (decay)
-    loss_sum.value(tag=tag_name, simple_value=running_avg_loss)
+    loss_sum.value.add(tag=tag_name, simple_value=running_avg_loss)
     writer.add_summary(loss_sum, step)
 
     tf.logging.info('running_avg_loss: %f', running_avg_loss)
@@ -193,6 +193,12 @@ def main(unused_args):
 
     # setup vocabulary
     vocab = Vocab(FLAGS.vocab_path, FLAGS.vocab_size, FLAGS.emb_dim)
+
+    if FLAGS.mode == 'decode':
+        FLAGS.batch_size = FLAGS.beam_size
+
+    if FLAGS.single_pass and FLAGS.mode != 'decode':
+        raise Exception("The single_pass flag should only be True in decode mode")
 
     # setup hps
     hps_name = ['mode',

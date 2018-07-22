@@ -1,3 +1,5 @@
+import os, time
+
 import tensorflow as tf
 
 FLAGS = tf.app.flags.FLAGS

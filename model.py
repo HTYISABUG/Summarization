@@ -379,7 +379,7 @@ class Model(object):
         assert len(result['attn_dists']) == 1
         assert len(result['p_gens']) == 1
 
-        dec_out_states = [tf.contrib.rnn_cell.LSTMStateTuple(result['states'].c[i], result['states'].h[i]) for i in range(beam_size)]
+        dec_out_states = [tf.nn.rnn_cell.LSTMStateTuple(result['states'].c[i], result['states'].h[i]) for i in range(beam_size)]
         attn_dists = result['attn_dists'][0].tolist()
         p_gens = result['p_gens'][0].tolist()
 

@@ -79,7 +79,7 @@ class Vocab(object):
     def i2w(self, i):
         if i not in self.__id2word:
             raise ValueError('Id not found in vocab: %d' % i)
-        return self._id_to_word[word_id]
+        return self.__id2word[i]
 
     @property
     def size(self):

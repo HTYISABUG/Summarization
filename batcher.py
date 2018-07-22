@@ -219,7 +219,7 @@ class Example(object):
 
     def __get_dec_input_target_seqs(self, sequence, max_len, start_id, stop_id):
         input_ = [start_id] + sequence
-        target = sequence
+        target = sequence[:]
 
         if len(input_) > max_len:
             input_ = input_[:max_len]

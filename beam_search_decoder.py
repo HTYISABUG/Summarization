@@ -1,6 +1,8 @@
 import os, time, logging
 
 import tensorflow as tf
+import pyrouge
+
 import util, data
 
 FLAGS = tf.app.flags.FLAGS
@@ -87,12 +89,12 @@ class BeamSearchDecoder(object):
             origin_abstract_sens = batch.origin_abstract_sens[0]
 
             article_with_unks = data.highlight_art_oovs(origin_article, self.__vocab)
-            abstract_with_unks = data.highlight_abs_oovs(origin_abstract, batch.article_oovs[0])
+            abstract_with_unks = data.highlight_abs_oovs(origin_abstract, self.__vocab, batch.article_oovs[0])
 
             best_hyp = self.__run(batch)
 
             dec_ids = [int(t) for t in best_hyp.tokens[1:]]
-            dec_words = data.output2words(ids, self.__vocab, batch.article_oovs[0])
+            dec_words = data.output2words(dec_ids, self.__vocab, batch.article_oovs[0])
 
             try:
                 stop_idx = dec_words.index(data.STOP_TOKEN)
@@ -103,7 +105,7 @@ class BeamSearchDecoder(object):
             output = ' '.join(dec_words)
 
             if FLAGS.single_pass:
-                self.__write_for_rouge(ref_sens, dec_words, cnt)
+                self.__write_for_rouge(origin_abstract_sens, dec_words, cnt)
                 cnt += 1
             else:
                 print()
@@ -122,7 +124,7 @@ class BeamSearchDecoder(object):
     def __run(self, batch):
         enc_outputs, dec_in_state = self.__model.run_encoder(self.__sess, batch)
 
-        hyps = [Hypothesis(tokens[vocab.w2i(data.START_TOKEN)],
+        hyps = [Hypothesis(tokens=[self.__vocab.w2i(data.START_TOKEN)],
                           log_probs=[0.0],
                           state=dec_in_state,
                           attn_dists=[],
@@ -134,20 +136,20 @@ class BeamSearchDecoder(object):
         step = 0
 
         def sort_hyps(hyps):
-            return sorted(hyps, lambda h: h.avg_log_prob, reverse=True)
+            return sorted(hyps, key=lambda h: h.avg_log_prob, reverse=True)
 
         while step < FLAGS.max_dec_steps and len(results) < FLAGS.beam_size:
             latest_tokens = [h.latest_token for h in hyps]
             latest_tokens = [t if t in range(self.__vocab.size) else unk_id for t in latest_tokens]
             states = [h.state for h in hyps]
 
-            top_k_ids, top_k_probs, new_states, attn_dists, p_gens = model.run_decode_once(
+            top_k_ids, top_k_probs, new_states, attn_dists, p_gens = self.__model.run_decode_once(
                     self.__sess, batch, latest_tokens, enc_outputs, states)
 
             new_hyps = []
             num_origin_hyps = 1 if step == 0 else len(hyps)
 
-            for i in range(len(num_origin_hyps)):
+            for i in range(num_origin_hyps):
                 h, new_state, attn_dist, p_gen = hyps[i], new_states[i], attn_dists[i], p_gens[i]
 
                 for j in range(FLAGS.beam_size * 2):
@@ -192,7 +194,7 @@ class BeamSearchDecoder(object):
 
             sen = dec_words[:period_idx+1]
             dec_words = dec_words[period_idx+1:]
-            dec_sens.append(sen)
+            dec_sens.append(' '.join(sen))
 
         def html_safe(s):
 
@@ -209,11 +211,11 @@ class BeamSearchDecoder(object):
         ref_path = os.path.join(self.__rouge_ref_dir, '%06d_reference.txt' % (flabel))
         dec_path = os.path.join(self.__rouge_dec_dir, '%06d_decoded.txt' % (flabel))
 
-        with open(ref_path) as fp:
+        with open(ref_path, 'w') as fp:
             for i, sen in enumerate(ref_sens):
                 fp.write(sen) if i == len(ref_sens) - 1 else fp.write(sen + '\n')
 
-        with open(dec_path) as fp:
+        with open(dec_path, 'w') as fp:
             for i, sen in enumerate(dec_sens):
                 fp.write(sen) if i == len(dec_sens) - 1 else fp.write(sen + '\n')
 
@@ -261,11 +263,11 @@ def rouge_log(results_dict, dir_to_write):
             log_str += '%s: %.4f with confidence interval (%.4f, %.4f)\n' % (key, val, val_cb, val_ce)
 
     tf.logging.info(log_str)
-    tf.logging.info('Writing final ROUGE results to %s...' % (results_file))
 
     results_file = os.path.join(dir_to_write, 'ROUGE_results.txt')
+    tf.logging.info('Writing final ROUGE results to %s...' % (results_file))
 
-    with open(results_file) as fp:
+    with open(results_file, 'w') as fp:
         fp.write(log_str)
 
 class Hypothesis(object):
@@ -314,6 +316,10 @@ class Hypothesis(object):
     @property
     def tokens(self):
         return self.__tokens
+
+    @property
+    def state(self):
+        return self.__state
 
     @property
     def latest_token(self):
