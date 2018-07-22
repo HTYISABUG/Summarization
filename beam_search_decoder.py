@@ -248,7 +248,7 @@ def rouge_log(results_dict, dir_to_write):
 
     log_str = ''
 
-    for x in ['1', '2', '1']:
+    for x in ['1', '2', 'l']:
         log_str += '\nROUGE-%s:\n' % x
 
         for y in ['f_score', 'recall', 'precision']:
