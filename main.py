@@ -114,7 +114,8 @@ def run_eval(model, batcher):
     eval_dir = os.path.join(FLAGS.log_root, 'eval')
     bestmodel_path = os.path.join(eval_dir, 'bestmodel')
 
-    model.build()
+    with tf.device('/cpu:0'):
+        model.build()
 
     with tf.Session(config=util.get_config()) as sess:
         saver = tf.train.Saver()
