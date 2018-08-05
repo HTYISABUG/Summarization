@@ -1,5 +1,6 @@
 absl-py==0.2.2
 astor==0.6.2
+beautifulsoup4==4.6.1
 bleach==1.5.0
 boto==2.48.0
 boto3==1.7.38
@@ -15,6 +16,7 @@ html5lib==0.9999999
 idna==2.7
 jmespath==0.9.3
 Markdown==2.6.11
+nltk==3.3
 numpy==1.14.5
 protobuf==3.6.0
 pyrouge==0.1.3
