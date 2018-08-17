@@ -3,8 +3,6 @@ import glob, random, struct
 import tensorflow as tf
 import numpy as np
 
-from gensim.models import KeyedVectors
-
 SENTENCE_START = '<s>'
 SENTENCE_END   = '</s>'
 
@@ -21,19 +19,9 @@ class Vocab(object):
 
         cnt = 0
 
-        wv = KeyedVectors.load_word2vec_format('./word2vec/GoogleNews-vectors-negative300.bin', binary=True)
-        wv_dim = wv[PAD_TOKEN].shape[0]
-
-        self.embedding = np.zeros((vocab_size, emb_dim), dtype=np.float32)
-
         for w in [PAD_TOKEN, UNKNOWN_TOKEN, START_TOKEN, STOP_TOKEN]:
             self.__word2id[w] = cnt
             self.__id2word[cnt] = w
-
-            if wv_dim < emb_dim:
-                self.embedding[cnt][:wv_dim] = wv[w]
-            else:
-                self.embedding[cnt] = wv[w][:emb_dim]
 
             cnt += 1
 
@@ -51,16 +39,9 @@ class Vocab(object):
                     raise Exception('<s>, </s>, UNK, PAD, START and STOP shouldn\'t be in the vocab file, but %s is' % w)
                 elif w in self.__word2id:
                     raise Exception('Duplicated word in vocabulary file: %s' % w)
-                elif w not in wv.vocab:
-                    continue
 
                 self.__word2id[w] = cnt
                 self.__id2word[cnt] = w
-
-                if wv_dim < emb_dim:
-                    self.embedding[cnt][:wv_dim] = wv[w]
-                else:
-                    self.embedding[cnt] = wv[w][:emb_dim]
 
                 cnt += 1
 
@@ -69,7 +50,6 @@ class Vocab(object):
                     break
 
             self.__size = cnt
-            self.embedding = self.embedding[:cnt]
 
             print('Finished constructing vocabulary of %i total words. Last word added: %s' % (cnt, self.__id2word[cnt-1]))
 

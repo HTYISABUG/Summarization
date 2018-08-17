@@ -22,12 +22,13 @@ tf.app.flags.DEFINE_string('exp_name',   '',      'Name for experiment. Logs wil
 
 tf.app.flags.DEFINE_integer('hidden_dim',    256,   'dimension of RNN hidden states')
 tf.app.flags.DEFINE_integer('batch_size',    16,    'batch size')
-tf.app.flags.DEFINE_integer('emb_dim',       300,   'dimension of word embeddings')
+tf.app.flags.DEFINE_integer('emb_dim',       128,   'dimension of word embeddings')
 tf.app.flags.DEFINE_integer('max_enc_steps', 400,   'max timesteps of encoder (max source text tokens)')
 tf.app.flags.DEFINE_integer('min_dec_steps', 35,    'Minimum sequence length of generated summary. Applies only for beam search mode')
 tf.app.flags.DEFINE_integer('max_dec_steps', 100,   'max timesteps of decoder (max summary tokens)')
 tf.app.flags.DEFINE_integer('vocab_size',    50000, 'size of vocabulary')
 tf.app.flags.DEFINE_integer('beam_size',     4,     'beam size for beam search decoding.')
+tf.app.flags.DEFINE_integer('num_gpu',       1,     'number of gpu')
 
 tf.app.flags.DEFINE_float('lr',                 0.15, 'learning rate')
 tf.app.flags.DEFINE_float('adagrad_init_acc',   0.1,  'initial accumulator value for Adagrad')
@@ -203,7 +204,7 @@ def main(unused_args):
 
     # setup hps
     hps_name = ['mode',
-                'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size',
+                'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size', 'num_gpu',
                 'lr', 'adagrad_init_acc', 'rand_unif_init_mag', 'trun_norm_init_std', 'max_grad_norm']
     hps = {}
 

@@ -29,9 +29,6 @@ class Model(object):
         self.__dec_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
         self.__target_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='target_batch') # target word ids
 
-        # embedding
-        self.__embs = tf.placeholder(tf.float32, [hps.vocab_size, hps.emb_dim], name='embs')
-
         self.__build_seq2seq()
 
         self.sess_hooks = [tf.train.NanTensorHook(self.__loss)]
@@ -42,8 +39,8 @@ class Model(object):
         hps = self.__hps
 
         with tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
-            self.rand_unif_init = tf.random_normal_initializer(-hps.rand_unif_init_mag, hps.rand_unif_init_mag, seed=123)
-            self.trun_norm_init = tf.truncated_normal_initializer(stddev=hps.trun_norm_init_std)
+            self.__rand_unif_init = tf.random_normal_initializer(-hps.rand_unif_init_mag, hps.rand_unif_init_mag, seed=123)
+            self.__trun_norm_init = tf.truncated_normal_initializer(stddev=hps.trun_norm_init_std)
 
             enc_inputs, dec_inputs = self.__build_embedding()
             enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs)
@@ -78,8 +75,7 @@ class Model(object):
         hps = self.__hps
 
         with tf.variable_scope('embedding'):
-            embedding = tf.get_variable('embedding', shape=[hps.vocab_size, hps.emb_dim], dtype=tf.float32, trainable=False)
-            self.__load_embs = tf.assign(embedding, self.__embs)
+            embedding = tf.get_variable('embedding', shape=[hps.vocab_size, hps.emb_dim], initializer=self.__trun_norm_init)
 
             enc_input_embs = tf.nn.embedding_lookup(embedding, self.__enc_batch)
             dec_input_embs = [tf.nn.embedding_lookup(embedding, x) for x in tf.unstack(self.__dec_batch, axis=1)]
@@ -101,8 +97,8 @@ class Model(object):
         hps = self.__hps
 
         with tf.variable_scope('encoder'):
-            fw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.rand_unif_init, state_is_tuple=True)
-            bw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.rand_unif_init, state_is_tuple=True)
+            fw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
+            bw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
             (outputs, (fw_stat, bw_stat)) = tf.nn.bidirectional_dynamic_rnn(fw, bw, inputs, dtype=tf.float32, sequence_length=self.__enc_lens, swap_memory=True)
             outputs = tf.concat(outputs, axis=2)
 
@@ -127,8 +123,17 @@ class Model(object):
             encoder_c = tf.concat([fw_stat.c, bw_stat.c], axis=1)
             encoder_h = tf.concat([fw_stat.h, bw_stat.h], axis=1)
 
-            decoder_c = tf.layers.dense(encoder_c, hps.hidden_dim, activation=tf.nn.relu, name='dec_state_c')
-            decoder_h = tf.layers.dense(encoder_h, hps.hidden_dim, activation=tf.nn.relu, name='dec_state_h')
+            decoder_c = tf.layers.dense(encoder_c, hps.hidden_dim,
+                                        activation=tf.nn.relu,
+                                        kernel_initializer=self.__trun_norm_init,
+                                        bias_initializer=self.__trun_norm_init,
+                                        name='dec_state_c')
+
+            decoder_h = tf.layers.dense(encoder_h, hps.hidden_dim,
+                                        activation=tf.nn.relu,
+                                        kernel_initializer=self.__trun_norm_init,
+                                        bias_initializer=self.__trun_norm_init,
+                                        name='dec_state_h')
 
             return tf.contrib.rnn.LSTMStateTuple(decoder_c, decoder_h)
 
@@ -151,7 +156,7 @@ class Model(object):
         hps = self.__hps
 
         with tf.variable_scope('attention_decoder'):
-            cell = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.rand_unif_init, state_is_tuple=True)
+            cell = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
 
             with tf.variable_scope('attention'):
 
@@ -195,7 +200,11 @@ class Model(object):
         hps = self.__hps
 
         with tf.variable_scope('vocab_distribution'):
-            return [tf.layers.dense(input_, hps.vocab_size, activation=tf.nn.softmax, reuse=tf.AUTO_REUSE) for input_ in inputs]
+            return [tf.layers.dense(input_, hps.vocab_size,
+                                    activation=tf.nn.softmax,
+                                    kernel_initializer=self.__trun_norm_init,
+                                    bias_initializer=self.__trun_norm_init,
+                                    reuse=tf.AUTO_REUSE) for input_ in inputs]
 
     def __build_final_distribution(self, vocab_dists, attn_dists, p_gens):
 
