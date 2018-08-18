@@ -28,7 +28,7 @@ tf.app.flags.DEFINE_integer('min_dec_steps', 35,    'Minimum sequence length of 
 tf.app.flags.DEFINE_integer('max_dec_steps', 100,   'max timesteps of decoder (max summary tokens)')
 tf.app.flags.DEFINE_integer('vocab_size',    50000, 'size of vocabulary')
 tf.app.flags.DEFINE_integer('beam_size',     4,     'beam size for beam search decoding.')
-tf.app.flags.DEFINE_integer('num_gpu',       1,     'number of gpu')
+tf.app.flags.DEFINE_integer('num_gpu',       2,     'number of gpu')
 
 tf.app.flags.DEFINE_float('lr',                 0.15, 'learning rate')
 tf.app.flags.DEFINE_float('adagrad_init_acc',   0.1,  'initial accumulator value for Adagrad')
@@ -38,8 +38,9 @@ tf.app.flags.DEFINE_float('max_grad_norm',      2.0,  'for gradient clipping')
 
 tf.app.flags.DEFINE_boolean('single_pass', False, 'For decode mode only. If True, run eval on the full dataset using a fixed checkpoint, i.e. take the current checkpoint, and use it to produce one summary for each example in the dataset, write the summaries to file and then get ROUGE scores for the whole dataset. If False (default), run concurrent decoding, i.e. repeatedly load latest checkpoint, use it to produce summaries for randomly-chosen examples and log the results to screen, indefinitely.')
 tf.app.flags.DEFINE_boolean('restore_best_model', False, 'Restore the best model in the eval dir and save it in the train dir, ready to be used for further training. Useful for early stopping, or if your training checkpoint has become corrupted with e.g. NaN values.')
+tf.app.flags.DEFINE_boolean('cpu_only', False, 'calculate with cpu only')
 
-def run_training(model, batcher, emb):
+def run_training(model, batcher):
 
     '''Setup and repeatedly runs training iterations, logging loss to screen and writing summaries'''
 
@@ -58,8 +59,6 @@ def run_training(model, batcher, emb):
         }
 
         with tf.train.MonitoredTrainingSession(**sess_params) as sess:
-            model.load_embs(sess._tf_sess(), emb)
-
             tf.logging.info('starting run_training')
 
             while True:
@@ -115,8 +114,7 @@ def run_eval(model, batcher):
     eval_dir = os.path.join(FLAGS.log_root, 'eval')
     bestmodel_path = os.path.join(eval_dir, 'bestmodel')
 
-    with tf.device('/cpu:0'):
-        model.build()
+    model.build()
 
     with tf.Session(config=util.get_config()) as sess:
         saver = tf.train.Saver()
@@ -193,8 +191,8 @@ def main(unused_args):
         if FLAGS.mode == 'train': os.makedirs(FLAGS.log_root)
         else: raise Exception("Logdir %s doesn't exist. Run in train mode to create it." % (FLAGS.log_root))
 
-    # setup vocabulary
-    vocab = Vocab(FLAGS.vocab_path, FLAGS.vocab_size, FLAGS.emb_dim)
+    if FLAGS.mode != 'train':
+        FLAGS.cpu_only = True
 
     if FLAGS.mode == 'decode':
         FLAGS.batch_size = FLAGS.beam_size
@@ -202,14 +200,27 @@ def main(unused_args):
     if FLAGS.single_pass and FLAGS.mode != 'decode':
         raise Exception("The single_pass flag should only be True in decode mode")
 
+    # setup vocabulary
+    vocab = Vocab(FLAGS.vocab_path, FLAGS.vocab_size, FLAGS.emb_dim)
+
     # setup hps
     hps_name = ['mode',
                 'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size', 'num_gpu',
-                'lr', 'adagrad_init_acc', 'rand_unif_init_mag', 'trun_norm_init_std', 'max_grad_norm']
+                'lr', 'adagrad_init_acc', 'rand_unif_init_mag', 'trun_norm_init_std', 'max_grad_norm',
+                'cpu_only']
     hps = {}
 
     for k, v in FLAGS.__flags.items():
         if k in hps_name: hps[k] = v.value
+
+    if not FLAGS.cpu_only:
+        parallel_batch_size = FLAGS.batch_size / FLAGS.num_gpu
+
+        assert FLAGS.batch_size % FLAGS.num_gpu == 0, 'batch_size isn\'t divisible by num_gpu'
+
+        hps['parallel_batch_size'] = int(parallel_batch_size)
+    else:
+        hps['parallel_batch_size'] = FLAGS.batch_size
 
     if FLAGS.mode == 'decode':
         hps['max_dec_steps'] = 1
@@ -222,7 +233,7 @@ def main(unused_args):
 
     if FLAGS.mode == 'train':
         model = Model(hps)
-        run_training(model, batcher, vocab.embedding)
+        run_training(model, batcher)
     elif FLAGS.mode == 'eval':
         model = Model(hps)
         run_eval(model, batcher)

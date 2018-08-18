@@ -1,4 +1,5 @@
 import time
+from pprint import pprint
 
 import tensorflow as tf
 import numpy as np
@@ -15,42 +16,108 @@ class Model(object):
 
         ts = time.time()
 
-        self.global_step = tf.train.get_or_create_global_step()
+        self.__global_step    = tf.train.get_or_create_global_step()
+        self.__rand_unif_init = tf.random_normal_initializer(-hps.rand_unif_init_mag, hps.rand_unif_init_mag, seed=123)
+        self.__trun_norm_init = tf.truncated_normal_initializer(stddev=hps.trun_norm_init_std)
 
         # encoder
-        self.__enc_batch = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch') # word ids
-        self.__enc_lens = tf.placeholder(tf.int32, [hps.batch_size], name='enc_lens') # sentence lengths
-        self.__enc_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='enc_pad_mask') # mask the PAD tokens
-        self.__enc_batch_ext_vocab = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch_ext_vocab')
-        self.__max_n_oov = tf.placeholder(tf.int32, [], name='max_n_oov')
+        enc_batch           = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch') # word ids
+        enc_lens            = tf.placeholder(tf.int32, [hps.batch_size], name='enc_lens') # sentence lengths
+        enc_pad_mask        = tf.placeholder(tf.float32, [hps.batch_size, None], name='enc_pad_mask') # mask the PAD tokens
+        enc_batch_ext_vocab = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch_ext_vocab')
+        self.__max_n_oov    = tf.placeholder(tf.int32, [], name='max_n_oov')
 
         # decoder
-        self.__dec_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='dec_batch') # word ids
-        self.__dec_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
-        self.__target_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='target_batch') # target word ids
+        dec_batch    = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='dec_batch') # word ids
+        dec_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
+        target_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='target_batch') # target word ids
 
-        self.__build_seq2seq()
+        if not hps.cpu_only:
 
-        self.sess_hooks = [tf.train.NanTensorHook(self.__loss)]
+            # split data for parallel training
+            with tf.device('/cpu:0'), tf.variable_scope('split'):
+                split_enc_lens            = tf.split(enc_lens, hps.num_gpu)
+                split_enc_pad_mask        = tf.split(enc_pad_mask, hps.num_gpu)
+                split_enc_batch_ext_vocab = tf.split(enc_batch_ext_vocab, hps.num_gpu)
+                split_dec_pad_mask        = tf.split(dec_pad_mask, hps.num_gpu)
+                split_target_batch        = tf.split(target_batch, hps.num_gpu)
 
-        tf.logging.info('Time to build graph: %i seconds', time.time() - ts)
+            all_grads = []
+            losses = []
 
-    def __build_seq2seq(self):
-        hps = self.__hps
+            with tf.device('/device:GPU:0'):
+                enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
 
-        with tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
-            self.__rand_unif_init = tf.random_normal_initializer(-hps.rand_unif_init_mag, hps.rand_unif_init_mag, seed=123)
-            self.__trun_norm_init = tf.truncated_normal_initializer(stddev=hps.trun_norm_init_std)
+            with tf.device('/cpu:0'), tf.variable_scope('split'):
+                split_enc_inputs = tf.split(enc_inputs, hps.num_gpu)
+                split_dec_inputs = [tf.split(dec_input, hps.num_gpu) for dec_input in dec_inputs]
+                split_dec_inputs = list(zip(*split_dec_inputs))
 
-            enc_inputs, dec_inputs = self.__build_embedding()
-            enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs)
-            dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
-            dec_outputs, dec_out_state, attn_dists, p_gens = self.__build_decoder(dec_inputs, enc_outputs, dec_in_state)
-            vocab_dists = self.__build_vocab_distribution(dec_outputs)
-            final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens)
+            # define training model
+            with tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
 
-            loss = self.__build_loss(final_dists)
-            train_op = self.__build_train_op(loss)
+                for i in range(hps.num_gpu):
+
+                    with tf.device('/device:GPU:%d' % (i)):
+                        enc_outputs, fw_stat, bw_stat = self.__build_encoder(split_enc_inputs[i], split_enc_lens[i])
+                        dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
+                        dec_outputs, dec_out_state, attn_dists, p_gens = self.__build_decoder(split_dec_inputs[i], enc_outputs, dec_in_state, split_enc_pad_mask[i])
+                        vocab_dists = self.__build_vocab_distribution(dec_outputs)
+                        final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens, split_enc_batch_ext_vocab[i])
+
+                        loss = self.__build_loss(final_dists, split_dec_pad_mask[i], split_target_batch[i])
+
+                        # calculate gradients
+                        with tf.variable_scope('cal_grads_%d' % (i)):
+                            grads = tf.gradients(loss, tf.trainable_variables(scope='seq2seq'), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
+                            grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
+
+                        tf.summary.scalar('loss_%d' % (i), loss)
+                        tf.summary.scalar('global_norm_%d' % (i), global_norm)
+
+                        all_grads.append(grads)
+                        losses.append(loss)
+
+                loss = tf.reduce_mean(tf.stack(losses), axis=0)
+
+            # merge and apply gradients
+            with tf.device('/cpu:0'), tf.variable_scope('apply_grads'):
+
+                with tf.device('/device:GPU:0'):
+                    emb_grads = tf.gradients(loss, tf.trainable_variables(scope='embedding'), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
+                    emb_grads, _ = tf.clip_by_global_norm(emb_grads, hps.max_grad_norm)
+
+                emb_grads_and_vars = list(zip(emb_grads, tf.trainable_variables(scope='embedding')))
+
+                grads = [tf.reduce_mean(tf.stack(all_vgrads), axis=0) for all_vgrads in zip(*all_grads)]
+                grads_and_vars = list(zip(grads, tf.trainable_variables(scope='seq2seq')))
+
+                all_grads_and_vars = emb_grads_and_vars + grads_and_vars
+
+                optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
+                train_op = optimizer.apply_gradients(all_grads_and_vars, global_step=self.__global_step)
+
+        else:
+
+            with tf.device('/cpu:0'), tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
+                enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
+                enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs, enc_lens)
+                dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
+                dec_outputs, dec_out_state, attn_dists, p_gens = self.__build_decoder(dec_inputs, enc_outputs, dec_in_state, enc_pad_mask)
+                vocab_dists = self.__build_vocab_distribution(dec_outputs)
+                final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens, enc_batch_ext_vocab)
+
+                loss = self.__build_loss(final_dists, dec_pad_mask, target_batch)
+
+                with tf.variable_scope('apply_grads'):
+                    grads = tf.gradients(loss, tf.trainable_variables(), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
+                    grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
+
+                    optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
+                    train_op = optimizer.apply_gradients(zip(grads, tf.trainable_variables()), global_step=self.__global_step)
+
+                tf.summary.scalar('loss', loss)
+                tf.summary.scalar('global_norm', global_norm)
 
         if hps.mode == 'decode':
             assert len(final_dists) == 1
@@ -62,32 +129,70 @@ class Model(object):
             self.__top_k_ids = top_k_ids
             self.__top_k_probs = top_k_probs
 
-        self.__enc_outputs = enc_outputs
-        self.__dec_in_state = dec_in_state
-        self.__dec_out_state = dec_out_state
-        self.__attn_dists = attn_dists
-        self.__p_gens = p_gens
+        self.sess_hooks = [tf.train.NanTensorHook(loss)]
+
+        tf.logging.info('Time to build graph: %i seconds', time.time() - ts)
+
+        # properties for running
+        self.__enc_batch           = enc_batch
+        self.__enc_lens            = enc_lens
+        self.__enc_pad_mask        = enc_pad_mask
+        self.__enc_batch_ext_vocab = enc_batch_ext_vocab
+        self.__dec_batch           = dec_batch
+        self.__dec_pad_mask        = dec_pad_mask
+        self.__target_batch        = target_batch
+
         self.__loss = loss
         self.__train_op = train_op
         self.__summary = tf.summary.merge_all()
 
-    def __build_embedding(self):
+        if hps.cpu_only:
+            self.__enc_outputs   = enc_outputs
+            self.__dec_in_state  = dec_in_state
+            self.__dec_out_state = dec_out_state
+            self.__attn_dists    = attn_dists
+            self.__p_gens        = p_gens
+
+        total_memory = 0
+
+        for var in tf.global_variables():
+            memory = np.prod(var.shape) * 4
+            total_memory += memory
+
+            # print(var.name, '\t', var.shape, '\t', var.device, '\t', memory, 'Bytes')
+
+        tf.logging.info('Total memory used: %d Bytes' % (total_memory))
+
+    def __build_embedding(self, enc_batch, dec_batch):
+
+        '''Add a word embedding layer to the graph
+
+        Args:
+            enc_batch: A tensor of shape [batch_size, <=max_enc_steps].
+            dec_batch: A tensor of shape [batch_size, max_dec_steps].
+
+        Returns:
+            enc_input_embs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
+            dec_input_embs: A tensor of shape [batch_size, max_dec_steps, emb_size].
+        '''
+
         hps = self.__hps
 
         with tf.variable_scope('embedding'):
             embedding = tf.get_variable('embedding', shape=[hps.vocab_size, hps.emb_dim], initializer=self.__trun_norm_init)
 
-            enc_input_embs = tf.nn.embedding_lookup(embedding, self.__enc_batch)
-            dec_input_embs = [tf.nn.embedding_lookup(embedding, x) for x in tf.unstack(self.__dec_batch, axis=1)]
+            enc_input_embs = tf.nn.embedding_lookup(embedding, enc_batch)
+            dec_input_embs = [tf.nn.embedding_lookup(embedding, x) for x in tf.unstack(dec_batch, axis=1)]
 
             return enc_input_embs, dec_input_embs
 
-    def __build_encoder(self, inputs):
+    def __build_encoder(self, enc_inputs, enc_lens):
 
         '''Add a single-layer bidirectional LSTM encoder to the graph.
 
         Args:
-            encoder_inputs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
+            enc_inputs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
+            enc_lens: A tensor of shape [batch_size].
 
         Returns:
             outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
@@ -99,7 +204,10 @@ class Model(object):
         with tf.variable_scope('encoder'):
             fw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
             bw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
-            (outputs, (fw_stat, bw_stat)) = tf.nn.bidirectional_dynamic_rnn(fw, bw, inputs, dtype=tf.float32, sequence_length=self.__enc_lens, swap_memory=True)
+            (outputs, (fw_stat, bw_stat)) = tf.nn.bidirectional_dynamic_rnn(fw, bw, enc_inputs,
+                                                                            dtype=tf.float32,
+                                                                            sequence_length=enc_lens,
+                                                                            swap_memory=True)
             outputs = tf.concat(outputs, axis=2)
 
             return outputs, fw_stat, bw_stat
@@ -137,7 +245,7 @@ class Model(object):
 
             return tf.contrib.rnn.LSTMStateTuple(decoder_c, decoder_h)
 
-    def __build_decoder(self, inputs, enc_outputs, state):
+    def __build_decoder(self, inputs, enc_outputs, state, enc_pad_mask):
 
         '''Add attention decoder to the graph.
 
@@ -145,6 +253,7 @@ class Model(object):
             inputs: inputs to the decoder (word embeddings). A list of tensors shape (batch_size, emb_dim)
             enc_outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
             state: LSTMStateTuple with hidden_dim units.
+            enc_pad_mask: A tensor of shape [batch_size, <= max_enc_steps].
 
         Returns:
             outputs: List of tensors; the outputs of the decoder
@@ -162,7 +271,7 @@ class Model(object):
 
                 def masked_probability_fn(score):
                     attn_dist = tf.nn.softmax(score)
-                    attn_dist *= self.__enc_pad_mask
+                    attn_dist *= enc_pad_mask
                     attn_sum  = tf.reduce_sum(attn_dist, axis=1)
                     return attn_dist / tf.reshape(attn_sum, [-1, 1])
 
@@ -174,7 +283,7 @@ class Model(object):
             attn_dists = []
             p_gens = []
 
-            zero_state = attention_wrapper.zero_state(hps.batch_size, tf.float32)
+            zero_state = attention_wrapper.zero_state(hps.parallel_batch_size, tf.float32)
             state = zero_state.clone(cell_state=state)
 
             for i, input_ in enumerate(inputs):
@@ -206,7 +315,7 @@ class Model(object):
                                     bias_initializer=self.__trun_norm_init,
                                     reuse=tf.AUTO_REUSE) for input_ in inputs]
 
-    def __build_final_distribution(self, vocab_dists, attn_dists, p_gens):
+    def __build_final_distribution(self, vocab_dists, attn_dists, p_gens, enc_batch_ext_vocab):
 
         '''Calculate the final distribution, for the pointer-generator model
 
@@ -214,6 +323,7 @@ class Model(object):
             vocab_dists: The vocabulary distributions. List length max_dec_steps of (batch_size, vsize) arrays. The words are in the order they appear in the vocabulary file.
             attn_dists: The attention distributions. List length max_dec_steps of (batch_size, attn_len) arrays
             p_gens: A list of tensors shape (batch_size, 1); the generation probabilities
+            enc_batch_ext_vocab: A tensor of shape [batch_size, None].
 
         Returns:
             final_dists: The final distributions. List length max_dec_steps of (batch_size, extended_vsize) arrays.
@@ -226,54 +336,39 @@ class Model(object):
             attn_dists = [(1 - p_gen) * attn_dist for p_gen, attn_dist in zip(p_gens, attn_dists)]
 
             ext_vocab_size = hps.vocab_size + self.__max_n_oov
-            ext_zeros = tf.zeros([hps.batch_size, self.__max_n_oov])
+            ext_zeros = tf.zeros([hps.parallel_batch_size, self.__max_n_oov])
             ext_vocab_dists = [tf.concat([vocab_dist, ext_zeros], axis=1) for vocab_dist in vocab_dists]
 
-            attn_len = tf.shape(self.__enc_batch_ext_vocab)[1]
-            batch_nums = tf.range(hps.batch_size)
+            attn_len = tf.shape(enc_batch_ext_vocab)[1]
+            batch_nums = tf.range(hps.parallel_batch_size)
             batch_nums = tf.expand_dims(batch_nums, 1)
             batch_nums = tf.tile(batch_nums, [1, attn_len])
 
-            indices = tf.stack([batch_nums, self.__enc_batch_ext_vocab], axis=2)
-            shape = [hps.batch_size, ext_vocab_size]
+            indices = tf.stack([batch_nums, enc_batch_ext_vocab], axis=2)
+            shape = [hps.parallel_batch_size, ext_vocab_size]
             proj_attn_dists = [tf.scatter_nd(indices, attn_dist, shape) for attn_dist in attn_dists]
 
             return [vocab_dist + attn_dist for vocab_dist, attn_dist in zip(ext_vocab_dists, proj_attn_dists)]
 
-    def __build_loss(self, final_dists):
+    def __build_loss(self, final_dists, dec_pad_mask, target_batch):
         hps = self.__hps
 
         with tf.variable_scope('loss'):
             losses = []
-            batch_nums = tf.range(hps.batch_size)
+            batch_nums = tf.range(hps.parallel_batch_size)
 
             for step, dist in enumerate(final_dists):
-                targets = self.__target_batch[:, step]
+                targets = target_batch[:, step]
                 indices = tf.stack([batch_nums, targets], axis=1)
                 probs = tf.gather_nd(dist, indices)
                 loss = -tf.log(probs)
                 losses.append(loss)
 
-            dec_lens = tf.reduce_sum(self.__dec_pad_mask, axis=1)
-            losses = [loss * self.__dec_pad_mask[:, step] for step, loss in enumerate(losses)]
+            dec_lens = tf.reduce_sum(dec_pad_mask, axis=1)
+            losses = [loss * dec_pad_mask[:, step] for step, loss in enumerate(losses)]
             loss = tf.reduce_mean(sum(losses) / dec_lens)
 
-            tf.summary.scalar('loss', loss)
-
             return loss
-
-    def __build_train_op(self, loss):
-        hps = self.__hps
-
-        with tf.variable_scope('train_op'):
-            grads = tf.gradients(loss, tf.trainable_variables(), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
-            grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
-
-            tf.summary.scalar('global_norm', global_norm)
-
-            optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
-
-            return optimizer.apply_gradients(zip(grads, tf.trainable_variables()), global_step=self.global_step, name='train_op')
 
     def __make_feed_dict(self, batch, just_enc=False):
 
@@ -304,17 +399,17 @@ class Model(object):
         '''Runs one training iteration. Returns a dict containing train op, summaries, loss, global_step.'''
 
         feed_dict = self.__make_feed_dict(batch)
-        rets = {'train_op': self.__train_op,
-                'loss': self.__loss,
-                'global_step': self.global_step}
+        rets = {'global_step': self.__global_step,
+                'loss':        self.__loss,
+                'train_op':    self.__train_op,}
 
         return sess.run(rets, feed_dict=feed_dict)
 
     def run_eval_step(self, sess, batch):
         feed_dict = self.__make_feed_dict(batch)
-        rets = {'summary': self.__summary,
-                'loss': self.__loss,
-                'global_step': self.global_step}
+        rets = {'global_step': self.__global_step,
+                'loss':        self.__loss,
+                'summary':     self.__summary,}
 
         return sess.run(rets, feed_dict=feed_dict)
 
@@ -333,7 +428,7 @@ class Model(object):
 
         feed_dict = self.__make_feed_dict(batch, just_enc=True)
         enc_outputs, dec_in_state, global_step = sess.run(
-            [self.__enc_outputs, self.__dec_in_state, self.global_step],
+            [self.__enc_outputs, self.__dec_in_state, self.__global_step],
             feed_dict=feed_dict
         )
 
@@ -376,11 +471,11 @@ class Model(object):
         }
 
         rets = {
-            'ids': self.__top_k_ids,
-            'probs': self.__top_k_probs,
-            'states': self.__dec_out_state,
+            'ids':        self.__top_k_ids,
+            'probs':      self.__top_k_probs,
+            'states':     self.__dec_out_state,
             'attn_dists': self.__attn_dists,
-            'p_gens': self.__p_gens
+            'p_gens':     self.__p_gens
         }
 
         result = sess.run(rets, feed_dict=feed_dict)
@@ -393,6 +488,3 @@ class Model(object):
         p_gens = result['p_gens'][0].tolist()
 
         return result['ids'], result['probs'], dec_out_states, attn_dists, p_gens
-
-    def load_embs(self, sess, emb):
-        sess.run(self.__load_embs, feed_dict={self.__embs: emb})
