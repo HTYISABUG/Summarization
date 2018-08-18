@@ -9,7 +9,7 @@ class Model(object):
     def __init__(self, hps):
         self.__hps = hps
 
-    def build(self):
+    def build(self, device=None):
         hps = self.__hps
 
         tf.logging.info('Building graph...')
@@ -45,7 +45,7 @@ class Model(object):
             all_grads = []
             losses = []
 
-            with tf.device('/device:GPU:0'):
+            with tf.device(device or '/device:GPU:0'):
                 enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
 
             with tf.device('/cpu:0'), tf.variable_scope('split'):
@@ -58,7 +58,7 @@ class Model(object):
 
                 for i in range(hps.num_gpu):
 
-                    with tf.device('/device:GPU:%d' % (i)):
+                    with tf.device(device or '/device:GPU:%d' % (i)):
                         enc_outputs, fw_stat, bw_stat = self.__build_encoder(split_enc_inputs[i], split_enc_lens[i])
                         dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
                         dec_outputs, dec_out_state, attn_dists, p_gens = self.__build_decoder(split_dec_inputs[i], enc_outputs, dec_in_state, split_enc_pad_mask[i])
@@ -83,7 +83,7 @@ class Model(object):
             # merge and apply gradients
             with tf.device('/cpu:0'), tf.variable_scope('apply_grads'):
 
-                with tf.device('/device:GPU:0'):
+                with tf.device(device or '/device:GPU:0'):
                     emb_grads = tf.gradients(loss, tf.trainable_variables(scope='embedding'), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
                     emb_grads, _ = tf.clip_by_global_norm(emb_grads, hps.max_grad_norm)
 

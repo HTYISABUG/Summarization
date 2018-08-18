@@ -26,7 +26,7 @@ class BeamSearchDecoder(object):
         self.__batcher = batcher
         self.__vocab = vocab
 
-        self.__model.build()
+        self.__model.build(device='/cpu:0')
 
         self.__sess = tf.Session(config=util.get_config())
         self.__saver = tf.train.Saver()

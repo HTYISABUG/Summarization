@@ -38,7 +38,7 @@ tf.app.flags.DEFINE_float('max_grad_norm',      2.0,  'for gradient clipping')
 
 tf.app.flags.DEFINE_boolean('single_pass', False, 'For decode mode only. If True, run eval on the full dataset using a fixed checkpoint, i.e. take the current checkpoint, and use it to produce one summary for each example in the dataset, write the summaries to file and then get ROUGE scores for the whole dataset. If False (default), run concurrent decoding, i.e. repeatedly load latest checkpoint, use it to produce summaries for randomly-chosen examples and log the results to screen, indefinitely.')
 tf.app.flags.DEFINE_boolean('restore_best_model', False, 'Restore the best model in the eval dir and save it in the train dir, ready to be used for further training. Useful for early stopping, or if your training checkpoint has become corrupted with e.g. NaN values.')
-tf.app.flags.DEFINE_boolean('cpu_only', False, 'calculate with cpu only')
+tf.app.flags.DEFINE_boolean('cpu_only', False, 'training with cpu only')
 
 def run_training(model, batcher):
 
@@ -114,7 +114,7 @@ def run_eval(model, batcher):
     eval_dir = os.path.join(FLAGS.log_root, 'eval')
     bestmodel_path = os.path.join(eval_dir, 'bestmodel')
 
-    model.build()
+    model.build(device='/cpu:0')
 
     with tf.Session(config=util.get_config()) as sess:
         saver = tf.train.Saver()
@@ -190,9 +190,6 @@ def main(unused_args):
     if not os.path.exists(FLAGS.log_root):
         if FLAGS.mode == 'train': os.makedirs(FLAGS.log_root)
         else: raise Exception("Logdir %s doesn't exist. Run in train mode to create it." % (FLAGS.log_root))
-
-    if FLAGS.mode != 'train':
-        FLAGS.cpu_only = True
 
     if FLAGS.mode == 'decode':
         FLAGS.batch_size = FLAGS.beam_size
