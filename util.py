@@ -13,9 +13,10 @@ def load_ckpt(sess, saver, ckpt_dir='train'):
 
     '''Load checkpoint from the ckpt_dir and restore it to saver and sess, waiting 10 secs in the case of failure.'''
 
+    ckpt_dir = os.path.join(FLAGS.log_root, ckpt_dir)
+
     while True:
         try:
-            ckpt_dir = os.path.join(FLAGS.log_root, ckpt_dir)
             latest_filename = 'best.ckpt' if ckpt_dir == 'eval' else None
             ckpt_state = tf.train.get_checkpoint_state(ckpt_dir, latest_filename=latest_filename)
             saver.restore(sess, ckpt_state.model_checkpoint_path)
