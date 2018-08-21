@@ -5,21 +5,21 @@ import requests, bs4
 from bs4 import BeautifulSoup
 from nltk.tokenize import sent_tokenize
 
-_data_path = 'data'
-_abs_path = os.path.join(_data_path, 'abs')
-_pdf_path = os.path.join(_data_path, 'pdf')
-
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--number', '-n', type=int, default=10)
+    parser.add_argument('--number', '-n', default=10)
+    parser.add_argument('--data_path', default='data')
 
     args = parser.parse_args()
 
+    abs_path = os.path.join(args.data_path, 'abs')
+    pdf_path = os.path.join(args.data_path, 'pdf')
+
     # make directories
-    if not os.path.exists(_data_path): os.makedirs(_data_path)
-    if not os.path.exists(_abs_path): os.makedirs(_abs_path)
-    if not os.path.exists(_pdf_path): os.makedirs(_pdf_path)
+    if not os.path.exists(args.data_path): os.makedirs(args.data_path)
+    if not os.path.exists(abs_path): os.makedirs(abs_path)
+    if not os.path.exists(pdf_path): os.makedirs(pdf_path)
 
     site = 'https://arxiv.org/list/cs/pastweek?show=' + str(args.number)
 
@@ -41,8 +41,10 @@ if __name__ == '__main__':
 
     cnt = 0
 
-    with open(os.path.join(_data_path, 'papar_list.txt'), 'w') as fp:
+    with open(os.path.join(args.ata_path, 'papar_list.txt'), 'w') as fp:
+
         for dt, dd in zip(dts, dds):
+
             if cnt >= args.number:
                 break
 
@@ -61,7 +63,9 @@ if __name__ == '__main__':
             abs_text = ''
 
             for t in abs_bs.blockquote.contents[2:]:
+
                 if type(t) is bs4.element.Tag:
+
                     if t.string is not None:
                         abs_text += t.string
                 else:
@@ -70,7 +74,7 @@ if __name__ == '__main__':
             abs_text = ' '.join(abs_text.split())
             abs_text = '\n'.join(sent_tokenize(abs_text))
 
-            with open(os.path.join(_abs_path, hs + '.abs'), 'w') as fp_:
+            with open(os.path.join(abs_path, hs + '.abs'), 'w') as fp_:
                 fp_.writelines(abs_text)
 
             # download pdf file
@@ -78,7 +82,8 @@ if __name__ == '__main__':
             r = requests.get(url)
 
             if r.status_code == 200:
-                with open(os.path.join(_pdf_path, hs + '.pdf'), 'wb') as fp_:
+
+                with open(os.path.join(pdf_path, hs + '.pdf'), 'wb') as fp_:
                     fp_.write(r.content)
 
                 fp.write(st + '\n')

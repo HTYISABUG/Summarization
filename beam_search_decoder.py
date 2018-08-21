@@ -14,6 +14,7 @@ class BeamSearchDecoder(object):
     """Beam search decoder"""
 
     def __init__(self, model, batcher, vocab):
+
         """Initialize decoder.
 
         Args:

@@ -32,92 +32,16 @@ class Model(object):
         dec_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
         target_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='target_batch') # target word ids
 
-        if not hps.cpu_only:
+        with tf.device(device or '/device:GPU:0'), tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
+            enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
+            enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs, enc_lens)
+            dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
+            dec_outputs, dec_out_state, attn_dists, p_gens = self.__build_decoder(dec_inputs, enc_outputs, dec_in_state, enc_pad_mask)
+            vocab_dists = self.__build_vocab_distribution(dec_outputs)
+            final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens, enc_batch_ext_vocab)
 
-            # split data for parallel training
-            with tf.device('/cpu:0'), tf.variable_scope('split'):
-                split_enc_lens            = tf.split(enc_lens, hps.num_gpu)
-                split_enc_pad_mask        = tf.split(enc_pad_mask, hps.num_gpu)
-                split_enc_batch_ext_vocab = tf.split(enc_batch_ext_vocab, hps.num_gpu)
-                split_dec_pad_mask        = tf.split(dec_pad_mask, hps.num_gpu)
-                split_target_batch        = tf.split(target_batch, hps.num_gpu)
-
-            all_grads = []
-            losses = []
-
-            with tf.device(device or '/device:GPU:0'):
-                enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
-
-            with tf.device('/cpu:0'), tf.variable_scope('split'):
-                split_enc_inputs = tf.split(enc_inputs, hps.num_gpu)
-                split_dec_inputs = [tf.split(dec_input, hps.num_gpu) for dec_input in dec_inputs]
-                split_dec_inputs = list(zip(*split_dec_inputs))
-
-            # define training model
-            with tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
-
-                for i in range(hps.num_gpu):
-
-                    with tf.device(device or '/device:GPU:%d' % (i)):
-                        enc_outputs, fw_stat, bw_stat = self.__build_encoder(split_enc_inputs[i], split_enc_lens[i])
-                        dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
-                        dec_outputs, dec_out_state, attn_dists, p_gens = self.__build_decoder(split_dec_inputs[i], enc_outputs, dec_in_state, split_enc_pad_mask[i])
-                        vocab_dists = self.__build_vocab_distribution(dec_outputs)
-                        final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens, split_enc_batch_ext_vocab[i])
-
-                        loss = self.__build_loss(final_dists, split_dec_pad_mask[i], split_target_batch[i])
-
-                        # calculate gradients
-                        with tf.variable_scope('cal_grads_%d' % (i)):
-                            grads = tf.gradients(loss, tf.trainable_variables(scope='seq2seq'), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
-                            grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
-
-                        tf.summary.scalar('loss_%d' % (i), loss)
-                        tf.summary.scalar('global_norm_%d' % (i), global_norm)
-
-                        all_grads.append(grads)
-                        losses.append(loss)
-
-                loss = tf.reduce_mean(tf.stack(losses), axis=0)
-
-            # merge and apply gradients
-            with tf.device('/cpu:0'), tf.variable_scope('apply_grads'):
-
-                with tf.device(device or '/device:GPU:0'):
-                    emb_grads = tf.gradients(loss, tf.trainable_variables(scope='embedding'), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
-                    emb_grads, _ = tf.clip_by_global_norm(emb_grads, hps.max_grad_norm)
-
-                emb_grads_and_vars = list(zip(emb_grads, tf.trainable_variables(scope='embedding')))
-
-                grads = [tf.reduce_mean(tf.stack(all_vgrads), axis=0) for all_vgrads in zip(*all_grads)]
-                grads_and_vars = list(zip(grads, tf.trainable_variables(scope='seq2seq')))
-
-                all_grads_and_vars = emb_grads_and_vars + grads_and_vars
-
-                optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
-                train_op = optimizer.apply_gradients(all_grads_and_vars, global_step=self.__global_step)
-
-        else:
-
-            with tf.device('/cpu:0'), tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
-                enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
-                enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs, enc_lens)
-                dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
-                dec_outputs, dec_out_state, attn_dists, p_gens = self.__build_decoder(dec_inputs, enc_outputs, dec_in_state, enc_pad_mask)
-                vocab_dists = self.__build_vocab_distribution(dec_outputs)
-                final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens, enc_batch_ext_vocab)
-
-                loss = self.__build_loss(final_dists, dec_pad_mask, target_batch)
-
-                with tf.variable_scope('apply_grads'):
-                    grads = tf.gradients(loss, tf.trainable_variables(), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
-                    grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
-
-                    optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
-                    train_op = optimizer.apply_gradients(zip(grads, tf.trainable_variables()), global_step=self.__global_step)
-
-                tf.summary.scalar('loss', loss)
-                tf.summary.scalar('global_norm', global_norm)
+            loss = self.__build_loss(final_dists, dec_pad_mask, target_batch)
+            train_op = self.__build_train_op(loss)
 
         if hps.mode == 'decode':
             assert len(final_dists) == 1
@@ -146,12 +70,11 @@ class Model(object):
         self.__train_op = train_op
         self.__summary = tf.summary.merge_all()
 
-        if hps.cpu_only:
-            self.__enc_outputs   = enc_outputs
-            self.__dec_in_state  = dec_in_state
-            self.__dec_out_state = dec_out_state
-            self.__attn_dists    = attn_dists
-            self.__p_gens        = p_gens
+        self.__enc_outputs   = enc_outputs
+        self.__dec_in_state  = dec_in_state
+        self.__dec_out_state = dec_out_state
+        self.__attn_dists    = attn_dists
+        self.__p_gens        = p_gens
 
         total_memory = 0
 
@@ -283,7 +206,7 @@ class Model(object):
             attn_dists = []
             p_gens = []
 
-            zero_state = attention_wrapper.zero_state(hps.parallel_batch_size, tf.float32)
+            zero_state = attention_wrapper.zero_state(hps.batch_size, tf.float32)
             state = zero_state.clone(cell_state=state)
 
             for i, input_ in enumerate(inputs):
@@ -336,16 +259,16 @@ class Model(object):
             attn_dists = [(1 - p_gen) * attn_dist for p_gen, attn_dist in zip(p_gens, attn_dists)]
 
             ext_vocab_size = hps.vocab_size + self.__max_n_oov
-            ext_zeros = tf.zeros([hps.parallel_batch_size, self.__max_n_oov])
+            ext_zeros = tf.zeros([hps.batch_size, self.__max_n_oov])
             ext_vocab_dists = [tf.concat([vocab_dist, ext_zeros], axis=1) for vocab_dist in vocab_dists]
 
             attn_len = tf.shape(enc_batch_ext_vocab)[1]
-            batch_nums = tf.range(hps.parallel_batch_size)
+            batch_nums = tf.range(hps.batch_size)
             batch_nums = tf.expand_dims(batch_nums, 1)
             batch_nums = tf.tile(batch_nums, [1, attn_len])
 
             indices = tf.stack([batch_nums, enc_batch_ext_vocab], axis=2)
-            shape = [hps.parallel_batch_size, ext_vocab_size]
+            shape = [hps.batch_size, ext_vocab_size]
             proj_attn_dists = [tf.scatter_nd(indices, attn_dist, shape) for attn_dist in attn_dists]
 
             return [vocab_dist + attn_dist for vocab_dist, attn_dist in zip(ext_vocab_dists, proj_attn_dists)]
@@ -355,7 +278,7 @@ class Model(object):
 
         with tf.variable_scope('loss'):
             losses = []
-            batch_nums = tf.range(hps.parallel_batch_size)
+            batch_nums = tf.range(hps.batch_size)
 
             for step, dist in enumerate(final_dists):
                 targets = target_batch[:, step]
@@ -368,7 +291,23 @@ class Model(object):
             losses = [loss * dec_pad_mask[:, step] for step, loss in enumerate(losses)]
             loss = tf.reduce_mean(sum(losses) / dec_lens)
 
+            tf.summary.scalar('loss', loss)
+
             return loss
+
+    def __build_train_op(self, loss):
+        hps = self.__hps
+
+        with tf.variable_scope('train_op'):
+            grads = tf.gradients(loss, tf.trainable_variables(), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
+            grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
+
+            optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
+            train_op = optimizer.apply_gradients(zip(grads, tf.trainable_variables()), global_step=self.__global_step)
+
+            tf.summary.scalar('global_norm', global_norm)
+
+            return train_op
 
     def __make_feed_dict(self, batch, just_enc=False):
 

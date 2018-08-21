@@ -28,7 +28,6 @@ tf.app.flags.DEFINE_integer('min_dec_steps', 35,    'Minimum sequence length of 
 tf.app.flags.DEFINE_integer('max_dec_steps', 100,   'max timesteps of decoder (max summary tokens)')
 tf.app.flags.DEFINE_integer('vocab_size',    50000, 'size of vocabulary')
 tf.app.flags.DEFINE_integer('beam_size',     4,     'beam size for beam search decoding.')
-tf.app.flags.DEFINE_integer('num_gpu',       2,     'number of gpu')
 
 tf.app.flags.DEFINE_float('lr',                 0.15, 'learning rate')
 tf.app.flags.DEFINE_float('adagrad_init_acc',   0.1,  'initial accumulator value for Adagrad')
@@ -47,7 +46,7 @@ def run_training(model, batcher):
     train_dir = os.path.join(FLAGS.log_root, 'train')
     if not os.path.exists(train_dir): os.makedirs(train_dir)
 
-    model.build()
+    model.build(device='/cpu:0' if FLAGS.cpu_only else None)
 
     if FLAGS.restore_best_model: restore_best_model()
 
@@ -179,7 +178,7 @@ def calc_running_avg_loss(running_avg_loss, loss, writer, step, decay=0.99):
     return running_avg_loss
 
 def main(unused_args):
-    if len(unused_args) != 1: raise Exception('Problem with flags: %s' % unused_argv)
+    if len(unused_args) != 1: raise Exception('Problem with flags: %s' % unused_args)
 
     tf.logging.set_verbosity(tf.logging.INFO)
     tf.logging.info('Starting pointer generator in %s mode...', (FLAGS.mode))
@@ -202,22 +201,13 @@ def main(unused_args):
 
     # setup hps
     hps_name = ['mode',
-                'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size', 'num_gpu',
+                'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size',
                 'lr', 'adagrad_init_acc', 'rand_unif_init_mag', 'trun_norm_init_std', 'max_grad_norm',
                 'cpu_only']
     hps = {}
 
     for k, v in FLAGS.__flags.items():
         if k in hps_name: hps[k] = v.value
-
-    if not FLAGS.cpu_only:
-        parallel_batch_size = FLAGS.batch_size / FLAGS.num_gpu
-
-        assert FLAGS.batch_size % FLAGS.num_gpu == 0, 'batch_size isn\'t divisible by num_gpu'
-
-        hps['parallel_batch_size'] = int(parallel_batch_size)
-    else:
-        hps['parallel_batch_size'] = FLAGS.batch_size
 
     if FLAGS.mode == 'decode':
         hps['max_dec_steps'] = 1
