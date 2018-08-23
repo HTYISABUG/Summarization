@@ -32,6 +32,10 @@ class Model(object):
         dec_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
         target_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='target_batch') # target word ids
 
+        # coverage
+        if hps.mode == 'decode' and hps.coverage:
+            prev_coverage = tf.placeholder(tf.float32, [hps.batch_size, None], name='prev_coverage')
+
         with tf.device(device or '/device:GPU:0'), tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
             enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
             enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs, enc_lens)
@@ -168,7 +172,7 @@ class Model(object):
 
             return tf.contrib.rnn.LSTMStateTuple(decoder_c, decoder_h)
 
-    def __build_decoder(self, inputs, enc_outputs, state, enc_pad_mask):
+    def __build_decoder(self, inputs, enc_outputs, state, enc_pad_mask, prev_coverage=None):
 
         '''Add attention decoder to the graph.
 
@@ -177,12 +181,14 @@ class Model(object):
             enc_outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
             state: LSTMStateTuple with hidden_dim units.
             enc_pad_mask: A tensor of shape [batch_size, <= max_enc_steps].
+            prev_coverage: Previous coverage
 
         Returns:
             outputs: List of tensors; the outputs of the decoder
             state: The final state of the decoder
             attn_dists: A list containing tensors of shape (batch_size,attn_length).
             p_gens: A list of tensors shape (batch_size, 1); the generation probabilities
+            coverage: A tensor, the current coverage
         '''
 
         hps = self.__hps
@@ -199,7 +205,7 @@ class Model(object):
                     return attn_dist / tf.reshape(attn_sum, [-1, 1])
 
                 num_units = enc_outputs.get_shape()[2]
-                mechanism = tf.contrib.seq2seq.BahdanauAttention(num_units, enc_outputs, probability_fn=masked_probability_fn)
+                mechanism = CoverageBahdanauAttention(num_units, enc_outputs, probability_fn=masked_probability_fn)
                 attention_wrapper = tf.contrib.seq2seq.AttentionWrapper(cell, mechanism, alignment_history=True)
 
             outputs = []
@@ -427,3 +433,49 @@ class Model(object):
         p_gens = result['p_gens'][0].tolist()
 
         return result['ids'], result['probs'], dec_out_states, attn_dists, p_gens
+
+class CoverageBahdanauAttention(tf.contrib.seq2seq.BahdanauAttention):
+
+    '''Bahdanau-style attention with coverage.'''
+
+    def __init__(self,
+                 num_units,
+                 memory,
+                 memory_sequence_length=None,
+                 probability_fn=None,
+                 score_mask_value=None,
+                 dtype=None,
+                 name='BahdanauAttention'):
+
+        super(CoverageBahdanauAttention, self).__init__(num_units,
+                                                        memory,
+                                                        memory_sequence_length=memory_sequence_length,
+                                                        normalize=False,
+                                                        probability_fn=probability_fn,
+                                                        score_mask_value=score_mask_value,
+                                                        dtype=dtype,
+                                                        name=name)
+
+    def __call__(self, query, state):
+
+        with tf.variable_scope(None, 'bahdanau_attention', [query]):
+            processed_query = self.query_layer(query) if self.query_layer else query
+            score = self.__bahdanau_score(processed_query, self._keys)
+
+        alignments = self._probability_fn(score, state)
+        next_state = alignments
+
+        return alignments, next_state
+
+    def __bahdanau_score(self, processed_query, keys):
+        dtype = processed_query.dtype
+
+        # Get the number of hidden units from the trailing dimension of keys
+        num_units = keys.shape[2].value or tf.shape(keys)[2]
+
+        # Reshape from [batch_size, ...] to [batch_size, 1, ...] for broadcasting.
+        processed_query = tf.expand_dims(processed_query, 1)
+
+        v = tf.get_variable('attention_v', [num_units], dtype=dtype)
+
+        return tf.reduce_sum(v * tf.tanh(keys + processed_query), [2])

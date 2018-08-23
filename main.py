@@ -34,10 +34,67 @@ tf.app.flags.DEFINE_float('adagrad_init_acc',   0.1,  'initial accumulator value
 tf.app.flags.DEFINE_float('rand_unif_init_mag', 0.02, 'magnitude for lstm cells random uniform initializer')
 tf.app.flags.DEFINE_float('trun_norm_init_std', 1e-4, 'std of truncated normal initializer')
 tf.app.flags.DEFINE_float('max_grad_norm',      2.0,  'for gradient clipping')
+tf.app.flags.DEFINE_float('cov_loss_weight',    1.0,  'weight of coverage loss')
 
-tf.app.flags.DEFINE_boolean('single_pass', False, 'For decode mode only. If True, run eval on the full dataset using a fixed checkpoint, i.e. take the current checkpoint, and use it to produce one summary for each example in the dataset, write the summaries to file and then get ROUGE scores for the whole dataset. If False (default), run concurrent decoding, i.e. repeatedly load latest checkpoint, use it to produce summaries for randomly-chosen examples and log the results to screen, indefinitely.')
-tf.app.flags.DEFINE_boolean('restore_best_model', False, 'Restore the best model in the eval dir and save it in the train dir, ready to be used for further training. Useful for early stopping, or if your training checkpoint has become corrupted with e.g. NaN values.')
+tf.app.flags.DEFINE_boolean('single_pass', False, 'For decode mode only. If True, run eval on the full dataset using a fixed checkpoint. If False (default), run concurrent decoding.')
+tf.app.flags.DEFINE_boolean('restore_best_model', False, 'Restore the best model in the eval dir and save it in the train dir.')
 tf.app.flags.DEFINE_boolean('cpu_only', False, 'training with cpu only')
+tf.app.flags.DEFINE_boolean('coverage', False, 'Use coverage mechanism.')
+tf.app.flags.DEFINE_boolean('convert2coverage', False, 'Convert a non-coverage model to a coverage model.')
+
+def main(unused_args):
+    if len(unused_args) != 1: raise Exception('Problem with flags: %s' % unused_args)
+
+    tf.logging.set_verbosity(tf.logging.INFO)
+    tf.logging.info('Starting pointer generator in %s mode...', (FLAGS.mode))
+
+    # setup log directory
+    FLAGS.log_root = os.path.join(FLAGS.log_root, FLAGS.exp_name)
+
+    if not os.path.exists(FLAGS.log_root):
+        if FLAGS.mode == 'train': os.makedirs(FLAGS.log_root)
+        else: raise Exception("Logdir %s doesn't exist. Run in train mode to create it." % (FLAGS.log_root))
+
+    if FLAGS.mode == 'decode':
+        FLAGS.batch_size = FLAGS.beam_size
+
+    if FLAGS.single_pass and FLAGS.mode != 'decode':
+        raise Exception("The single_pass flag should only be True in decode mode")
+
+    # setup vocabulary
+    vocab = Vocab(FLAGS.vocab_path, FLAGS.vocab_size, FLAGS.emb_dim)
+
+    # setup hps
+    hps_name = ['mode',
+                'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size',
+                'lr', 'adagrad_init_acc', 'rand_unif_init_mag', 'trun_norm_init_std', 'max_grad_norm', 'cov_loss_weight',
+                'cpu_only', 'coverage']
+    hps = {}
+
+    for k, v in FLAGS.__flags.items():
+        if k in hps_name: hps[k] = v.value
+
+    if FLAGS.mode == 'decode':
+        hps['max_dec_steps'] = 1
+
+    hps = namedtuple('HyperParams', hps.keys())(**hps)
+
+    batcher = Batcher(FLAGS.data_path, vocab, hps, FLAGS.single_pass)
+
+    tf.set_random_seed(13131)
+
+    if FLAGS.mode == 'train':
+        model = Model(hps)
+        run_training(model, batcher)
+    elif FLAGS.mode == 'eval':
+        model = Model(hps)
+        run_eval(model, batcher)
+    elif FLAGS.mode == 'decode':
+        model = Model(hps)
+        decoder = BeamSearchDecoder(model, batcher, vocab)
+        decoder.decode()
+    else:
+        raise ValueError("The 'mode' flag must be one of train/eval/decode")
 
 def run_training(model, batcher):
 
@@ -48,7 +105,14 @@ def run_training(model, batcher):
 
     model.build(device='/cpu:0' if FLAGS.cpu_only else None)
 
-    if FLAGS.restore_best_model: restore_best_model()
+    if FLAGS.convert2coverage:
+
+        assert FLAGS.coverage, 'To convert your model to a coverage model, run with convert_to_coverage=True and coverage=True'
+
+        convert2coverage()
+
+    if FLAGS.restore_best_model:
+        restore_best_model()
 
     try:
         sess_params = {
@@ -71,6 +135,9 @@ def run_training(model, batcher):
                 tf.logging.info('seconds for training step: %.3f', time.time() - ts)
 
                 tf.logging.info('loss: %f', result['loss'])
+
+                if FLAGS.coverage:
+                    tf.logging.info('coverage loss: %f', result['coverage_loss'])
 
     except KeyboardInterrupt as e:
         tf.logging.info('Caught keyboard interrupt on worker. Stopping supervisor...')
@@ -106,6 +173,28 @@ def restore_best_model():
 
         sys.exit()
 
+def convert2coverage():
+
+    '''Load non-coverage checkpoint, add initialized extra variables for coverage, and save as new checkpoint'''
+
+    tf.logging.info('converting non-coverage model to coverage model...')
+
+    with tf.Session(config=util.get_config) as sess:
+        sess.run(tf.global_variables_initializer())
+
+        tf.logging.info('restoring non-coverage variables...')
+
+        saver = tf.train.Saver(var_list=[v for v in tf.global_variables() if 'coverage' not in v.name and 'Adagrad' not in v.name])
+        cur_ckpt = util.load_ckpt(sess, saver)
+        new_ckpt = cur_ckpt + '_cov_init'
+
+        tf.logging.info('saving model to %s...' % (new_ckpt))
+
+        new_saver = tf.train.Saver()
+        new_saver.save(sess, new_ckpt)
+
+    sys.exit()
+
 def run_eval(model, batcher):
 
     '''Repeatedly runs eval iterations, logging to screen and writing summaries. Saves the model with the best loss seen so far.'''
@@ -133,6 +222,9 @@ def run_eval(model, batcher):
 
             loss = result['loss']
             tf.logging.info('loss: %f', loss)
+
+            if FLAGS.coverage:
+                tf.logging.info('coverage loss: %f', result['coverage_loss'])
 
             summary = result['summary']
             global_step = result['global_step']
@@ -176,60 +268,6 @@ def calc_running_avg_loss(running_avg_loss, loss, writer, step, decay=0.99):
     tf.logging.info('running_avg_loss: %f', running_avg_loss)
 
     return running_avg_loss
-
-def main(unused_args):
-    if len(unused_args) != 1: raise Exception('Problem with flags: %s' % unused_args)
-
-    tf.logging.set_verbosity(tf.logging.INFO)
-    tf.logging.info('Starting pointer generator in %s mode...', (FLAGS.mode))
-
-    # setup log directory
-    FLAGS.log_root = os.path.join(FLAGS.log_root, FLAGS.exp_name)
-
-    if not os.path.exists(FLAGS.log_root):
-        if FLAGS.mode == 'train': os.makedirs(FLAGS.log_root)
-        else: raise Exception("Logdir %s doesn't exist. Run in train mode to create it." % (FLAGS.log_root))
-
-    if FLAGS.mode == 'decode':
-        FLAGS.batch_size = FLAGS.beam_size
-
-    if FLAGS.single_pass and FLAGS.mode != 'decode':
-        raise Exception("The single_pass flag should only be True in decode mode")
-
-    # setup vocabulary
-    vocab = Vocab(FLAGS.vocab_path, FLAGS.vocab_size, FLAGS.emb_dim)
-
-    # setup hps
-    hps_name = ['mode',
-                'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size',
-                'lr', 'adagrad_init_acc', 'rand_unif_init_mag', 'trun_norm_init_std', 'max_grad_norm',
-                'cpu_only']
-    hps = {}
-
-    for k, v in FLAGS.__flags.items():
-        if k in hps_name: hps[k] = v.value
-
-    if FLAGS.mode == 'decode':
-        hps['max_dec_steps'] = 1
-
-    hps = namedtuple('HyperParams', hps.keys())(**hps)
-
-    batcher = Batcher(FLAGS.data_path, vocab, hps, FLAGS.single_pass)
-
-    tf.set_random_seed(13131)
-
-    if FLAGS.mode == 'train':
-        model = Model(hps)
-        run_training(model, batcher)
-    elif FLAGS.mode == 'eval':
-        model = Model(hps)
-        run_eval(model, batcher)
-    elif FLAGS.mode == 'decode':
-        model = Model(hps)
-        decoder = BeamSearchDecoder(model, batcher, vocab)
-        decoder.decode()
-    else:
-        raise ValueError("The 'mode' flag must be one of train/eval/decode")
 
 if __name__ == '__main__':
     tf.app.run()
