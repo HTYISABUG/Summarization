@@ -2,6 +2,7 @@ import os, time, logging
 
 import tensorflow as tf
 import pyrouge
+import numpy as np
 
 import util, data
 
@@ -125,11 +126,14 @@ class BeamSearchDecoder(object):
     def __run(self, batch):
         enc_outputs, dec_in_state = self.__model.run_encoder(self.__sess, batch)
 
+        # Initialize beam_size-many hyptheses
         hyps = [Hypothesis(tokens=[self.__vocab.w2i(data.START_TOKEN)],
                           log_probs=[0.0],
                           state=dec_in_state,
                           attn_dists=[],
-                          p_gens=[]) for _ in range(FLAGS.beam_size)]
+                          p_gens=[],
+                          coverage=np.zeros([batch.enc_batch.shape[1]]),
+                          context_vector=np.zeros([FLAGS.hidden_dim])) for _ in range(FLAGS.beam_size)]
 
         results = []
 
@@ -143,25 +147,30 @@ class BeamSearchDecoder(object):
             latest_tokens = [h.latest_token for h in hyps]
             latest_tokens = [t if t in range(self.__vocab.size) else unk_id for t in latest_tokens]
             states = [h.state for h in hyps]
+            prev_coverages = [h.coverage for h in hyps]
+            prev_context_vectors = [h.context_vector for h in hyps]
 
-            top_k_ids, top_k_probs, new_states, attn_dists, p_gens = self.__model.run_decode_once(
-                    self.__sess, batch, latest_tokens, enc_outputs, states)
+            top_k_ids, top_k_probs, new_states, attn_dists, p_gens, coverages, context_vectors = self.__model.run_decode_once(
+                    self.__sess, batch, latest_tokens, enc_outputs, states, prev_coverages, prev_context_vectors)
 
             new_hyps = []
             num_origin_hyps = 1 if step == 0 else len(hyps)
 
             for i in range(num_origin_hyps):
                 h, new_state, attn_dist, p_gen = hyps[i], new_states[i], attn_dists[i], p_gens[i]
+                coverage, context_vector = coverages[i], context_vectors[i]
 
                 for j in range(FLAGS.beam_size * 2):
-                    new_hyp = h.next(top_k_ids[i, j], top_k_probs[i, j], new_state, attn_dist, p_gen)
+                    new_hyp = h.next(top_k_ids[i, j], top_k_probs[i, j], new_state, attn_dist, p_gen, coverage, context_vector)
                     new_hyps.append(new_hyp)
 
             hyps = []
 
             for h in sort_hyps(new_hyps):
-                if h.latest_token == self.__vocab.w2i(data.STOP_TOKEN) and step >= FLAGS.min_dec_steps:
-                    results.append(h)
+                if h.latest_token == self.__vocab.w2i(data.STOP_TOKEN):
+
+                    if step >= FLAGS.min_dec_steps:
+                        results.append(h)
                 else:
                     hyps.append(h)
 
@@ -275,7 +284,7 @@ class Hypothesis(object):
 
     '''Class to represent a hypothesis during beam search. Holds all the information needed for the hypothesis.'''
 
-    def __init__(self, tokens, log_probs, state, attn_dists, p_gens):
+    def __init__(self, tokens, log_probs, state, attn_dists, p_gens, coverage, context_vector):
 
         '''Hypothesis constructor.
 
@@ -285,6 +294,8 @@ class Hypothesis(object):
             state: Current state of the decoder, a LSTMStateTuple.
             attn_dists: List, same length as tokens, of numpy arrays with shape (attn_length).
             p_gens: List, same length as tokens, of floats, or None if not using pointer-generator model.
+            coverage: Numpy array of shape (attn_length), or None if not using coverage. The current coverage vector.
+            context_vector: Numpy array of shape (hidden_dim).
         '''
 
         self.__tokens = tokens
@@ -292,8 +303,10 @@ class Hypothesis(object):
         self.__state = state
         self.__attn_dists = attn_dists
         self.__p_gens = p_gens
+        self.__coverage = coverage
+        self.__context_vector = context_vector
 
-    def next(self, token, log_prob, state, attn_dist, p_gen):
+    def next(self, token, log_prob, state, attn_dist, p_gen, coverage, context_vector):
 
         '''Return a NEW hypothesis, extended with the information from the latest step of beam search.
 
@@ -303,6 +316,8 @@ class Hypothesis(object):
             state: Current decoder state, a LSTMStateTuple.
             attn_dist: Attention distribution from latest step. Numpy array shape (attn_length).
             p_gen: Generation probability on latest step. Float.
+            coverage: Latest coverage vector. Numpy array shape (attn_length), or None if not using coverage.
+            context_vector: Numpy array of shape (hidden_dim).
 
         Returns:
             New Hypothesis for next step.
@@ -312,7 +327,9 @@ class Hypothesis(object):
                           log_probs=self.__log_probs + [log_prob],
                           state=state,
                           attn_dists=self.__attn_dists + [attn_dist],
-                          p_gens=self.__p_gens + [p_gen])
+                          p_gens=self.__p_gens + [p_gen],
+                          coverage=coverage,
+                          context_vector=context_vector)
 
     @property
     def tokens(self):
@@ -333,3 +350,11 @@ class Hypothesis(object):
     @property
     def avg_log_prob(self):
         return self.log_prob / len(self.__log_probs)
+
+    @property
+    def coverage(self):
+        return self.__coverage
+
+    @property
+    def context_vector(self):
+        return self.__context_vector

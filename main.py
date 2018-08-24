@@ -179,7 +179,7 @@ def convert2coverage():
 
     tf.logging.info('converting non-coverage model to coverage model...')
 
-    with tf.Session(config=util.get_config) as sess:
+    with tf.Session(config=util.get_config()) as sess:
         sess.run(tf.global_variables_initializer())
 
         tf.logging.info('restoring non-coverage variables...')
