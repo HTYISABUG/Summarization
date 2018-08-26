@@ -133,7 +133,7 @@ class BeamSearchDecoder(object):
                           attn_dists=[],
                           p_gens=[],
                           coverage=np.zeros([batch.enc_batch.shape[1]]),
-                          context_vector=np.zeros([FLAGS.hidden_dim])) for _ in range(FLAGS.beam_size)]
+                          context_vector=np.zeros([FLAGS.hidden_dim * 2])) for _ in range(FLAGS.beam_size)]
 
         results = []
 

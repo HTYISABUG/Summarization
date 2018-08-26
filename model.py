@@ -42,7 +42,7 @@ class Model(object):
 
         # previous context vector
         if hps.mode == 'decode':
-            prev_context_vector = tf.placeholder(tf.float32, [hps.batch_size, hps.hidden_dim], name='prev_context_vector')
+            prev_context_vector = tf.placeholder(tf.float32, [hps.batch_size, hps.hidden_dim * 2], name='prev_context_vector')
 
             self.__prev_context_vector = prev_context_vector
         else:
@@ -482,7 +482,7 @@ class Model(object):
             self.__enc_outputs:         enc_states,
             self.__dec_batch:           np.transpose([latest_tokens]),
             self.__dec_in_state:        new_dec_in_state,
-            self.__context_vector:      np.vstack(prev_context_vectors)
+            self.__prev_context_vector: np.vstack(prev_context_vectors)
         }
 
         rets = {
