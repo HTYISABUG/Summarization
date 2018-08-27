@@ -8,7 +8,7 @@ import numpy as np
 import util
 from data import Vocab
 from batcher import Batcher
-from model import Model
+from model import Model, BaselineModel
 from beam_search_decoder import BeamSearchDecoder
 
 FLAGS = tf.app.flags.FLAGS
@@ -41,6 +41,7 @@ tf.app.flags.DEFINE_boolean('restore_best_model', False, 'Restore the best model
 tf.app.flags.DEFINE_boolean('cpu_only', False, 'training with cpu only')
 tf.app.flags.DEFINE_boolean('coverage', False, 'Use coverage mechanism.')
 tf.app.flags.DEFINE_boolean('convert2coverage', False, 'Convert a non-coverage model to a coverage model.')
+tf.app.flags.DEFINE_boolean('baseline', False, 'Use baseline model.')
 
 def main(unused_args):
     if len(unused_args) != 1: raise Exception('Problem with flags: %s' % unused_args)
@@ -83,14 +84,13 @@ def main(unused_args):
 
     tf.set_random_seed(13131)
 
+    model = Model(hps) if not FLAGS.baseline else BaselineModel(hps)
+
     if FLAGS.mode == 'train':
-        model = Model(hps)
         run_training(model, batcher)
     elif FLAGS.mode == 'eval':
-        model = Model(hps)
         run_eval(model, batcher)
     elif FLAGS.mode == 'decode':
-        model = Model(hps)
         decoder = BeamSearchDecoder(model, batcher, vocab)
         decoder.decode()
     else:
