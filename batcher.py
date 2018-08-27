@@ -210,7 +210,6 @@ class Example(object):
 
         if not hps.baseline:
             abs_ids_ext_vocab = data.abstract2ids(abstract_words, vocab, self.article_oovs)
-
             _, self.dec_target = self.__get_dec_input_target_seqs(abs_ids_ext_vocab, hps.max_dec_steps, start_id, stop_id)
 
         # origin backup

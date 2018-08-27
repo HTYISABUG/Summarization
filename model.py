@@ -24,8 +24,10 @@ class Model(object):
         enc_batch           = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch') # word ids
         enc_lens            = tf.placeholder(tf.int32, [hps.batch_size], name='enc_lens') # sentence lengths
         enc_pad_mask        = tf.placeholder(tf.float32, [hps.batch_size, None], name='enc_pad_mask') # mask the PAD tokens
-        enc_batch_ext_vocab = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch_ext_vocab')
-        self.__max_n_oov    = tf.placeholder(tf.int32, [], name='max_n_oov')
+
+        if not hps.baseline:
+            enc_batch_ext_vocab = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch_ext_vocab')
+            self.__max_n_oov    = tf.placeholder(tf.int32, [], name='max_n_oov')
 
         # decoder
         dec_batch    = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='dec_batch') # word ids
@@ -55,17 +57,21 @@ class Model(object):
             dec_outputs, dec_out_state, attn_dists, p_gens, coverage, context_vector = self.__build_decoder(
                     dec_inputs, enc_outputs, dec_in_state, enc_pad_mask, prev_coverage, prev_context_vector)
             vocab_dists = self.__build_vocab_distribution(dec_outputs)
-            final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens, enc_batch_ext_vocab)
+
+            if not hps.baseline:
+                final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens, enc_batch_ext_vocab)
+            else:
+                final_dists = vocab_dists
 
             loss = self.__build_loss(final_dists, dec_pad_mask, target_batch)
-
-            total_loss = loss
 
             if hps.coverage:
                 coverage_loss = self.__build_coverage_loss(attn_dists, dec_pad_mask)
                 total_loss = loss + hps.cov_loss_weight + coverage_loss
 
                 self.__coverage_loss = coverage_loss
+            else:
+                total_loss = loss
 
             train_op = self.__build_train_op(total_loss)
 
@@ -87,7 +93,10 @@ class Model(object):
         self.__enc_batch           = enc_batch
         self.__enc_lens            = enc_lens
         self.__enc_pad_mask        = enc_pad_mask
-        self.__enc_batch_ext_vocab = enc_batch_ext_vocab
+
+        if not hps.baseline:
+            self.__enc_batch_ext_vocab = enc_batch_ext_vocab
+
         self.__dec_batch           = dec_batch
         self.__dec_pad_mask        = dec_pad_mask
         self.__target_batch        = target_batch
@@ -268,9 +277,10 @@ class Model(object):
                     output = tf.layers.dense(output_feature, hps.hidden_dim, name='output')
                     outputs.append(output)
 
-                    p_gen_feature = tf.concat([context_vector, cell_state.c, cell_state.h, input_], axis=1)
-                    p_gen = tf.layers.dense(p_gen_feature, 1, activation=tf.nn.sigmoid, name='p_gen')
-                    p_gens.append(p_gen)
+                    if not hps.baseline:
+                        p_gen_feature = tf.concat([context_vector, cell_state.c, cell_state.h, input_], axis=1)
+                        p_gen = tf.layers.dense(p_gen_feature, 1, activation=tf.nn.sigmoid, name='p_gen')
+                        p_gens.append(p_gen)
 
             return outputs, state.cell_state, attn_dists, p_gens, mechanism.coverage, context_vector
 
@@ -388,8 +398,10 @@ class Model(object):
         feed_dict[self.__enc_batch]           = batch.enc_batch
         feed_dict[self.__enc_lens]            = batch.enc_lens
         feed_dict[self.__enc_pad_mask]        = batch.enc_pad_mask
-        feed_dict[self.__enc_batch_ext_vocab] = batch.enc_batch_ext_vocab
-        feed_dict[self.__max_n_oov]           = batch.max_n_oov
+
+        if not self.__hps.baseline:
+            feed_dict[self.__enc_batch_ext_vocab] = batch.enc_batch_ext_vocab
+            feed_dict[self.__max_n_oov]           = batch.max_n_oov
 
         if not just_enc:
             feed_dict[self.__dec_batch]    = batch.dec_batch
@@ -477,13 +489,15 @@ class Model(object):
 
         feed_dict = {
             self.__enc_pad_mask:        batch.enc_pad_mask,
-            self.__enc_batch_ext_vocab: batch.enc_batch_ext_vocab,
-            self.__max_n_oov:           batch.max_n_oov,
             self.__enc_outputs:         enc_states,
             self.__dec_batch:           np.transpose([latest_tokens]),
             self.__dec_in_state:        new_dec_in_state,
             self.__prev_context_vector: np.vstack(prev_context_vectors)
         }
+
+        if not self.__hps.baseline:
+            feed_dict[self.__enc_batch_ext_vocab] = batch.enc_batch_ext_vocab
+            feed_dict[self.__max_n_oov]           = batch.max_n_oov
 
         rets = {
             'ids':             self.__top_k_ids,
@@ -585,366 +599,3 @@ class CoverageBahdanauAttention(tf.contrib.seq2seq.BahdanauAttention):
     @property
     def coverage(self):
         return self.__coverage
-
-class BaselineModel(Model):
-
-    def __init__(self, hps):
-        self.__hps = hps
-
-    def build(self, device=None):
-        hps = self.__hps
-
-        tf.logging.info('Building graph...')
-
-        ts = time.time()
-
-        self.__global_step    = tf.train.get_or_create_global_step()
-        self.__rand_unif_init = tf.random_normal_initializer(-hps.rand_unif_init_mag, hps.rand_unif_init_mag, seed=123)
-        self.__trun_norm_init = tf.truncated_normal_initializer(stddev=hps.trun_norm_init_std)
-
-        # encoder
-        enc_batch    = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch') # word ids
-        enc_lens     = tf.placeholder(tf.int32, [hps.batch_size], name='enc_lens') # sentence lengths
-        enc_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='enc_pad_mask') # mask the PAD tokens
-
-        # decoder
-        dec_batch    = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='dec_batch') # word ids
-        dec_pad_mask = tf.placeholder(tf.float32, [hps.batch_size, None], name='dec_pad_mask') # mask the PAD tokens
-        target_batch = tf.placeholder(tf.int32, [hps.batch_size, hps.max_dec_steps], name='target_batch') # target word ids
-
-        # previous context vector
-        if hps.mode == 'decode':
-            prev_context_vector = tf.placeholder(tf.float32, [hps.batch_size, hps.hidden_dim * 2], name='prev_context_vector')
-
-            self.__prev_context_vector = prev_context_vector
-        else:
-            prev_context_vector = None
-
-        with tf.device(device or '/device:GPU:0'), tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
-            enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
-            enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs, enc_lens)
-            dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
-            dec_outputs, dec_out_state, attn_dists, context_vector = self.__build_decoder(
-                    dec_inputs, enc_outputs, dec_in_state, enc_pad_mask, prev_context_vector)
-            vocab_dists = self.__build_vocab_distribution(dec_outputs)
-
-            loss = self.__build_loss(vocab_dists, dec_pad_mask, target_batch)
-
-            train_op = self.__build_train_op(loss)
-
-        if hps.mode == 'decode':
-            assert len(vocab_dists) == 1
-
-            vocab_dists = vocab_dists[0]
-            top_k_probs, top_k_ids = tf.nn.top_k(vocab_dists, hps.batch_size * 2)
-            top_k_probs = tf.log(top_k_probs)
-
-            self.__top_k_ids = top_k_ids
-            self.__top_k_probs = top_k_probs
-
-        self.sess_hooks = [tf.train.NanTensorHook(loss)]
-
-        tf.logging.info('Time to build graph: %i seconds', time.time() - ts)
-
-        # properties for running
-        self.__enc_batch           = enc_batch
-        self.__enc_lens            = enc_lens
-        self.__enc_pad_mask        = enc_pad_mask
-        self.__dec_batch           = dec_batch
-        self.__dec_pad_mask        = dec_pad_mask
-        self.__target_batch        = target_batch
-
-        self.__loss = loss
-        self.__train_op = train_op
-        self.__summary = tf.summary.merge_all()
-
-        self.__enc_outputs    = enc_outputs
-        self.__dec_in_state   = dec_in_state
-        self.__dec_out_state  = dec_out_state
-        self.__attn_dists     = attn_dists
-        self.__context_vector = context_vector
-
-        total_memory = 0
-
-        for var in tf.global_variables():
-            memory = np.prod(var.shape) * 4
-            total_memory += memory
-
-            # print(var.name, '\t', var.shape, '\t', var.device, '\t', memory, 'Bytes')
-
-        tf.logging.info('Total memory used: %d Bytes' % (total_memory))
-
-    def __build_embedding(self, enc_batch, dec_batch):
-
-        '''Add a word embedding layer to the graph
-
-        Args:
-            enc_batch: A tensor of shape [batch_size, <=max_enc_steps].
-            dec_batch: A tensor of shape [batch_size, max_dec_steps].
-
-        Returns:
-            enc_input_embs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
-            dec_input_embs: A tensor of shape [batch_size, max_dec_steps, emb_size].
-        '''
-
-        hps = self.__hps
-
-        with tf.variable_scope('embedding'):
-            embedding = tf.get_variable('embedding', shape=[hps.vocab_size, hps.emb_dim], initializer=self.__trun_norm_init)
-
-            enc_input_embs = tf.nn.embedding_lookup(embedding, enc_batch)
-            dec_input_embs = [tf.nn.embedding_lookup(embedding, x) for x in tf.unstack(dec_batch, axis=1)]
-
-            return enc_input_embs, dec_input_embs
-
-    def __build_encoder(self, enc_inputs, enc_lens):
-
-        '''Add a single-layer bidirectional LSTM encoder to the graph.
-
-        Args:
-            enc_inputs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
-            enc_lens: A tensor of shape [batch_size].
-
-        Returns:
-            outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
-            fw_state, bw_state: Each are LSTMStateTuples of shape ([batch_size, hidden_dim], [batch_size, hidden_dim])
-        '''
-
-        hps = self.__hps
-
-        with tf.variable_scope('encoder'):
-            fw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
-            bw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
-            (outputs, (fw_stat, bw_stat)) = tf.nn.bidirectional_dynamic_rnn(fw, bw, enc_inputs,
-                                                                            dtype=tf.float32,
-                                                                            sequence_length=enc_lens,
-                                                                            swap_memory=True)
-            outputs = tf.concat(outputs, axis=2)
-
-            return outputs, fw_stat, bw_stat
-
-    def __build_reduce_states(self, fw_stat, bw_stat):
-
-        '''Add a dense layer to reduce the encoder's final state into a single initial state for the decoder.
-           This is needed because the encoder is bidirectional but the decoder is not.
-
-        Args:
-            fw_stat: LSTMStateTuple with hidden_dim units.
-            bw_stat: LSTMStateTuple with hidden_dim units.
-
-        Returns:
-            state: LSTMStateTuple with hidden_dim units.
-        '''
-
-        hps = self.__hps
-
-        with tf.variable_scope('reduce_states'):
-            encoder_c = tf.concat([fw_stat.c, bw_stat.c], axis=1)
-            encoder_h = tf.concat([fw_stat.h, bw_stat.h], axis=1)
-
-            decoder_c = tf.layers.dense(encoder_c, hps.hidden_dim,
-                                        activation=tf.nn.relu,
-                                        kernel_initializer=self.__trun_norm_init,
-                                        bias_initializer=self.__trun_norm_init,
-                                        name='dec_state_c')
-
-            decoder_h = tf.layers.dense(encoder_h, hps.hidden_dim,
-                                        activation=tf.nn.relu,
-                                        kernel_initializer=self.__trun_norm_init,
-                                        bias_initializer=self.__trun_norm_init,
-                                        name='dec_state_h')
-
-            return tf.contrib.rnn.LSTMStateTuple(decoder_c, decoder_h)
-
-    def __build_decoder(self, inputs, enc_outputs, state, enc_pad_mask, prev_context_vec=None):
-
-        '''Add attention decoder to the graph.
-
-        Args:
-            inputs: inputs to the decoder (word embeddings). A list of tensors shape (batch_size, emb_dim)
-            enc_outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
-            state: LSTMStateTuple with hidden_dim units.
-            enc_pad_mask: A tensor of shape [batch_size, <= max_enc_steps].
-            prev_context_vec: Previous context vector
-
-        Returns:
-            outputs: List of tensors; the outputs of the decoder
-            state: The final state of the decoder
-            attn_dists: A list containing tensors of shape (batch_size,attn_length).
-            context vector: A tensor, the current context vector
-        '''
-
-        hps = self.__hps
-
-        with tf.variable_scope('attention_decoder'):
-            cell = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
-
-            with tf.variable_scope('attention'):
-
-                def masked_probability_fn(score):
-                    attn_dist = tf.nn.softmax(score)
-                    attn_dist *= enc_pad_mask
-                    attn_sum  = tf.reduce_sum(attn_dist, axis=1)
-                    return attn_dist / tf.reshape(attn_sum, [-1, 1])
-
-                num_units = enc_outputs.get_shape()[2]
-                mechanism = tf.contrib.seq2seq.BahdanauAttention(num_units, enc_outputs, probability_fn=masked_probability_fn)
-
-                def cell_input_fn(inputs, attention):
-                    x = tf.concat([inputs, attention], 1)
-                    return tf.layers.dense(x, inputs.shape[1], reuse=tf.AUTO_REUSE)
-
-                attention_wrapper = tf.contrib.seq2seq.AttentionWrapper(cell, mechanism,
-                                                                        alignment_history=True)
-                                                                        # alignment_history=True,
-                                                                        # cell_input_fn=cell_input_fn)
-
-            outputs = []
-            attn_dists = []
-
-            zero_state = attention_wrapper.zero_state(hps.batch_size, tf.float32)
-
-            if prev_context_vec is None:
-                state = zero_state.clone(cell_state=state)
-            else:
-                state = zero_state.clone(cell_state=state, attention=prev_context_vec)
-
-            for i, input_ in enumerate(inputs):
-                tf.logging.info("Adding attention decoder timestep %i of %i", i + 1, len(inputs))
-
-                context_vector, state = attention_wrapper(input_, state)
-                attn_dists.append(state.alignments)
-
-                with tf.variable_scope('decoder'):
-                    cell_state = state.cell_state
-                    output_feature = tf.concat([context_vector, cell_state.c, cell_state.h], axis=1)
-                    output = tf.layers.dense(output_feature, hps.hidden_dim, name='output')
-                    outputs.append(output)
-
-            return outputs, state.cell_state, attn_dists, context_vector
-
-    def __build_vocab_distribution(self, inputs):
-        hps = self.__hps
-
-        with tf.variable_scope('vocab_distribution'):
-            return [tf.layers.dense(input_, hps.vocab_size,
-                                    activation=tf.nn.softmax,
-                                    kernel_initializer=self.__trun_norm_init,
-                                    bias_initializer=self.__trun_norm_init,
-                                    reuse=tf.AUTO_REUSE) for input_ in inputs]
-
-    def __build_loss(self, final_dists, dec_pad_mask, target_batch):
-        hps = self.__hps
-
-        with tf.variable_scope('loss'):
-            loss = tf.contrib.seq2seq.sequence_loss(tf.stack(final_dists, axis=1), target_batch, dec_pad_mask)
-
-            tf.summary.scalar('loss', loss)
-
-            return loss
-
-    def __build_train_op(self, loss):
-        hps = self.__hps
-
-        with tf.variable_scope('train_op'):
-            grads = tf.gradients(loss, tf.trainable_variables(), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
-            grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
-
-            optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
-            train_op = optimizer.apply_gradients(zip(grads, tf.trainable_variables()), global_step=self.__global_step)
-
-            tf.summary.scalar('global_norm', global_norm)
-
-            return train_op
-
-    def __make_feed_dict(self, batch, just_enc=False):
-
-        '''Make a feed dictionary mapping parts of the batch to the appropriate placeholders.
-
-        Args:
-            batch: Batch object
-            just_enc: Boolean. If True, only feed the parts needed for the encoder.
-        '''
-
-        feed_dict = {}
-
-        feed_dict[self.__enc_batch]           = batch.enc_batch
-        feed_dict[self.__enc_lens]            = batch.enc_lens
-        feed_dict[self.__enc_pad_mask]        = batch.enc_pad_mask
-
-        if not just_enc:
-            feed_dict[self.__dec_batch]    = batch.dec_batch
-            feed_dict[self.__dec_pad_mask] = batch.dec_pad_mask
-            feed_dict[self.__target_batch] = batch.target_batch
-
-        return feed_dict
-
-    def run_train_step(self, sess, batch):
-
-        '''Runs one training iteration. Returns a dict containing train op, summaries, loss, global_step.'''
-
-        feed_dict = self.__make_feed_dict(batch)
-        rets = {'global_step': self.__global_step,
-                'loss':        self.__loss,
-                'train_op':    self.__train_op,}
-
-        return sess.run(rets, feed_dict=feed_dict)
-
-    def run_eval_step(self, sess, batch):
-        feed_dict = self.__make_feed_dict(batch)
-        rets = {'global_step': self.__global_step,
-                'loss':        self.__loss,
-                'summary':     self.__summary,}
-
-        return sess.run(rets, feed_dict=feed_dict)
-
-    def run_decode_once(self, sess, batch, latest_tokens, enc_states, dec_in_states, prev_context_vectors):
-
-        '''For beam search decoding. Run the decoder for one step.
-
-        Args:
-            sess: Tensorflow session.
-            batch: Batch object containing single example repeated across the batch
-            latest_tokens: Tokens to be fed as input into the decoder for this timestep
-            enc_states: The encoder states.
-            dec_in_states: List of beam_size LSTMStateTuples; the decoder states from the previous timestep
-            prev_context_vectors: List of np arrays. The context vectors from the previous timestep.
-
-        Returns:
-            ids: top 2k ids. shape [beam_size, 2*beam_size]
-            probs: top 2k log probabilities. shape [beam_size, 2*beam_size]
-            dec_out_states: a list length beam_size containing LSTMStateTuples each of shape ([hidden_dim,],[hidden_dim,])
-            attn_dists: List length beam_size containing lists length attn_length.
-            context_vectors: Context vectors for this step. A list of arrays.
-        '''
-
-        beam_size = len(dec_in_states)
-
-        new_c = np.concatenate([np.expand_dims(state.c, axis=0) for state in dec_in_states], axis=0)
-        new_h = np.concatenate([np.expand_dims(state.h, axis=0) for state in dec_in_states], axis=0)
-        new_dec_in_state = tf.contrib.rnn.LSTMStateTuple(new_c, new_h)
-
-        feed_dict = {
-            self.__enc_pad_mask:        batch.enc_pad_mask,
-            self.__enc_outputs:         enc_states,
-            self.__dec_batch:           np.transpose([latest_tokens]),
-            self.__dec_in_state:        new_dec_in_state,
-            self.__prev_context_vector: np.vstack(prev_context_vectors)
-        }
-
-        rets = {
-            'ids':             self.__top_k_ids,
-            'probs':           self.__top_k_probs,
-            'states':          self.__dec_out_state,
-            'attn_dists':      self.__attn_dists,
-            'context_vectors': self.__context_vector
-        }
-
-        result = sess.run(rets, feed_dict=feed_dict)
-
-        assert len(result['attn_dists']) == 1
-
-        dec_out_states = [tf.nn.rnn_cell.LSTMStateTuple(result['states'].c[i], result['states'].h[i]) for i in range(beam_size)]
-        attn_dists = result['attn_dists'][0].tolist()
-
-        return result['ids'], result['probs'], dec_out_states, attn_dists, result['context_vectors']
