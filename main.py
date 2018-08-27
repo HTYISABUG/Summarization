@@ -69,7 +69,7 @@ def main(unused_args):
     hps_name = ['mode',
                 'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size',
                 'lr', 'adagrad_init_acc', 'rand_unif_init_mag', 'trun_norm_init_std', 'max_grad_norm', 'cov_loss_weight',
-                'cpu_only', 'coverage']
+                'cpu_only', 'coverage', 'baseline']
     hps = {}
 
     for k, v in FLAGS.__flags.items():

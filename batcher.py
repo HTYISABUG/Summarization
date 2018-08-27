@@ -205,12 +205,13 @@ class Example(object):
         ## Get a verison of the reference summary where in-article OOVs are represented by their temporary article OOV id
         abs_ids = [vocab.w2i(w) for w in abstract_words]
 
-        self.dec_input, _ = self.__get_dec_input_target_seqs(abs_ids, hps.max_dec_steps, start_id, stop_id)
+        self.dec_input, self.dec_target = self.__get_dec_input_target_seqs(abs_ids, hps.max_dec_steps, start_id, stop_id)
         self.dec_len = len(self.dec_input)
 
-        abs_ids_ext_vocab = data.abstract2ids(abstract_words, vocab, self.article_oovs)
+        if not hps.baseline:
+            abs_ids_ext_vocab = data.abstract2ids(abstract_words, vocab, self.article_oovs)
 
-        _, self.dec_target = self.__get_dec_input_target_seqs(abs_ids_ext_vocab, hps.max_dec_steps, start_id, stop_id)
+            _, self.dec_target = self.__get_dec_input_target_seqs(abs_ids_ext_vocab, hps.max_dec_steps, start_id, stop_id)
 
         # origin backup
         self.origin_article = article

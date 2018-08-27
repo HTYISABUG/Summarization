@@ -589,7 +589,7 @@ class CoverageBahdanauAttention(tf.contrib.seq2seq.BahdanauAttention):
 class BaselineModel(Model):
 
     def __init__(self, hps):
-        super(BaselineModel, self).__init__(hps)
+        self.__hps = hps
 
     def build(self, device=None):
         hps = self.__hps
@@ -674,6 +674,88 @@ class BaselineModel(Model):
 
         tf.logging.info('Total memory used: %d Bytes' % (total_memory))
 
+    def __build_embedding(self, enc_batch, dec_batch):
+
+        '''Add a word embedding layer to the graph
+
+        Args:
+            enc_batch: A tensor of shape [batch_size, <=max_enc_steps].
+            dec_batch: A tensor of shape [batch_size, max_dec_steps].
+
+        Returns:
+            enc_input_embs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
+            dec_input_embs: A tensor of shape [batch_size, max_dec_steps, emb_size].
+        '''
+
+        hps = self.__hps
+
+        with tf.variable_scope('embedding'):
+            embedding = tf.get_variable('embedding', shape=[hps.vocab_size, hps.emb_dim], initializer=self.__trun_norm_init)
+
+            enc_input_embs = tf.nn.embedding_lookup(embedding, enc_batch)
+            dec_input_embs = [tf.nn.embedding_lookup(embedding, x) for x in tf.unstack(dec_batch, axis=1)]
+
+            return enc_input_embs, dec_input_embs
+
+    def __build_encoder(self, enc_inputs, enc_lens):
+
+        '''Add a single-layer bidirectional LSTM encoder to the graph.
+
+        Args:
+            enc_inputs: A tensor of shape [batch_size, <=max_enc_steps, emb_size].
+            enc_lens: A tensor of shape [batch_size].
+
+        Returns:
+            outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
+            fw_state, bw_state: Each are LSTMStateTuples of shape ([batch_size, hidden_dim], [batch_size, hidden_dim])
+        '''
+
+        hps = self.__hps
+
+        with tf.variable_scope('encoder'):
+            fw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
+            bw = tf.nn.rnn_cell.LSTMCell(hps.hidden_dim, initializer=self.__rand_unif_init, state_is_tuple=True)
+            (outputs, (fw_stat, bw_stat)) = tf.nn.bidirectional_dynamic_rnn(fw, bw, enc_inputs,
+                                                                            dtype=tf.float32,
+                                                                            sequence_length=enc_lens,
+                                                                            swap_memory=True)
+            outputs = tf.concat(outputs, axis=2)
+
+            return outputs, fw_stat, bw_stat
+
+    def __build_reduce_states(self, fw_stat, bw_stat):
+
+        '''Add a dense layer to reduce the encoder's final state into a single initial state for the decoder.
+           This is needed because the encoder is bidirectional but the decoder is not.
+
+        Args:
+            fw_stat: LSTMStateTuple with hidden_dim units.
+            bw_stat: LSTMStateTuple with hidden_dim units.
+
+        Returns:
+            state: LSTMStateTuple with hidden_dim units.
+        '''
+
+        hps = self.__hps
+
+        with tf.variable_scope('reduce_states'):
+            encoder_c = tf.concat([fw_stat.c, bw_stat.c], axis=1)
+            encoder_h = tf.concat([fw_stat.h, bw_stat.h], axis=1)
+
+            decoder_c = tf.layers.dense(encoder_c, hps.hidden_dim,
+                                        activation=tf.nn.relu,
+                                        kernel_initializer=self.__trun_norm_init,
+                                        bias_initializer=self.__trun_norm_init,
+                                        name='dec_state_c')
+
+            decoder_h = tf.layers.dense(encoder_h, hps.hidden_dim,
+                                        activation=tf.nn.relu,
+                                        kernel_initializer=self.__trun_norm_init,
+                                        bias_initializer=self.__trun_norm_init,
+                                        name='dec_state_h')
+
+            return tf.contrib.rnn.LSTMStateTuple(decoder_c, decoder_h)
+
     def __build_decoder(self, inputs, enc_outputs, state, enc_pad_mask, prev_context_vec=None):
 
         '''Add attention decoder to the graph.
@@ -740,6 +822,40 @@ class BaselineModel(Model):
                     outputs.append(output)
 
             return outputs, state.cell_state, attn_dists, context_vector
+
+    def __build_vocab_distribution(self, inputs):
+        hps = self.__hps
+
+        with tf.variable_scope('vocab_distribution'):
+            return [tf.layers.dense(input_, hps.vocab_size,
+                                    activation=tf.nn.softmax,
+                                    kernel_initializer=self.__trun_norm_init,
+                                    bias_initializer=self.__trun_norm_init,
+                                    reuse=tf.AUTO_REUSE) for input_ in inputs]
+
+    def __build_loss(self, final_dists, dec_pad_mask, target_batch):
+        hps = self.__hps
+
+        with tf.variable_scope('loss'):
+            loss = tf.contrib.seq2seq.sequence_loss(tf.stack(final_dists, axis=1), target_batch, dec_pad_mask)
+
+            tf.summary.scalar('loss', loss)
+
+            return loss
+
+    def __build_train_op(self, loss):
+        hps = self.__hps
+
+        with tf.variable_scope('train_op'):
+            grads = tf.gradients(loss, tf.trainable_variables(), aggregation_method=tf.AggregationMethod.EXPERIMENTAL_TREE)
+            grads, global_norm = tf.clip_by_global_norm(grads, hps.max_grad_norm)
+
+            optimizer = tf.train.AdagradOptimizer(hps.lr, initial_accumulator_value=hps.adagrad_init_acc)
+            train_op = optimizer.apply_gradients(zip(grads, tf.trainable_variables()), global_step=self.__global_step)
+
+            tf.summary.scalar('global_norm', global_norm)
+
+            return train_op
 
     def __make_feed_dict(self, batch, just_enc=False):
 
