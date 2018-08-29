@@ -8,7 +8,7 @@ from nltk.tokenize import sent_tokenize
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--number', '-n', default=10)
+    parser.add_argument('--number', '-n', default=10, type=int)
     parser.add_argument('--data_path', default='data')
 
     args = parser.parse_args()
@@ -41,7 +41,7 @@ if __name__ == '__main__':
 
     cnt = 0
 
-    with open(os.path.join(args.ata_path, 'papar_list.txt'), 'w') as fp:
+    with open(os.path.join(args.data_path, 'paper_list.txt'), 'w') as fp:
 
         for dt, dd in zip(dts, dds):
 
