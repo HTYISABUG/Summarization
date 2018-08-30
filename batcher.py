@@ -208,9 +208,8 @@ class Example(object):
         self.dec_input, self.dec_target = self.__get_dec_input_target_seqs(abs_ids, hps.max_dec_steps, start_id, stop_id)
         self.dec_len = len(self.dec_input)
 
-        if not hps.baseline:
-            abs_ids_ext_vocab = data.abstract2ids(abstract_words, vocab, self.article_oovs)
-            _, self.dec_target = self.__get_dec_input_target_seqs(abs_ids_ext_vocab, hps.max_dec_steps, start_id, stop_id)
+        abs_ids_ext_vocab = data.abstract2ids(abstract_words, vocab, self.article_oovs)
+        _, self.ext_dec_target = self.__get_dec_input_target_seqs(abs_ids_ext_vocab, hps.max_dec_steps, start_id, stop_id)
 
         # origin backup
         self.origin_article = article
@@ -244,6 +243,9 @@ class Example(object):
 
         while len(self.dec_target) < max_len:
             self.dec_target.append(pad_id)
+
+        while len(self.ext_dec_target) < max_len:
+            self.ext_dec_target.append(pad_id)
 
 class Batch(object):
 
@@ -313,11 +315,13 @@ class Batch(object):
         self.dec_batch = np.zeros([hps.batch_size, hps.max_dec_steps], dtype=np.int32)
         self.dec_pad_mask = np.zeros([hps.batch_size, hps.max_dec_steps], dtype=np.float32)
         self.target_batch = np.zeros([hps.batch_size, hps.max_dec_steps], dtype=np.int32)
+        self.ext_target_batch = np.zeros([hps.batch_size, hps.max_dec_steps], dtype=np.int32)
 
         for i, e in enumerate(examples):
             self.dec_batch[i] = e.dec_input
             self.dec_pad_mask[i][:e.dec_len] = 1
             self.target_batch[i] = e.dec_target
+            self.ext_target_batch[i] = e.ext_dec_target
 
     def __store_origin(self, examples):
         self.origin_articles = [e.origin_article for e in examples]

@@ -40,9 +40,13 @@ tf.app.flags.DEFINE_boolean('single_pass', False, 'For decode mode only. If True
 
 tf.app.flags.DEFINE_boolean('restore_best_model', False, 'Restore the best model in the eval dir and save it in the train dir.')
 tf.app.flags.DEFINE_boolean('cpu_only',           False, 'training with cpu only')
-tf.app.flags.DEFINE_boolean('coverage',           False, 'Use coverage mechanism.')
-tf.app.flags.DEFINE_boolean('convert2coverage',   False, 'Convert a non-coverage model to a coverage model.')
-tf.app.flags.DEFINE_boolean('baseline',           False, 'Use baseline model.')
+
+tf.app.flags.DEFINE_boolean('p_gen',            False, 'Use pointer generator model.')
+tf.app.flags.DEFINE_boolean('coverage',         False, 'Use coverage mechanism.')
+tf.app.flags.DEFINE_boolean('convert2coverage', False, 'Convert a non-coverage model to a coverage model.')
+
+tf.app.flags.DEFINE_boolean('experiment',         False, 'Use experiment model.')
+tf.app.flags.DEFINE_boolean('convert2experiment', False, 'Convert a model to a experiment model.')
 
 def main(unused_args):
     if len(unused_args) != 1: raise Exception('Problem with flags: %s' % unused_args)
@@ -63,6 +67,9 @@ def main(unused_args):
     if FLAGS.single_pass and FLAGS.mode != 'decode':
         raise Exception("The single_pass flag should only be True in decode mode")
 
+    if not FLAGS.p_gen:
+        assert not FLAGS.coverage and not FLAGS.experiment
+
     # setup vocabulary
     vocab = Vocab(FLAGS.vocab_path, FLAGS.vocab_size, FLAGS.emb_dim)
 
@@ -70,7 +77,7 @@ def main(unused_args):
     hps_name = ['mode',
                 'hidden_dim', 'batch_size', 'emb_dim', 'max_enc_steps', 'max_dec_steps', 'vocab_size',
                 'lr', 'adagrad_init_acc', 'rand_unif_init_mag', 'trun_norm_init_std', 'max_grad_norm', 'cov_loss_weight',
-                'cpu_only', 'coverage', 'baseline']
+                'cpu_only', 'p_gen', 'coverage', 'experiment']
     hps = {}
 
     for k, v in FLAGS.__flags.items():
@@ -78,9 +85,6 @@ def main(unused_args):
 
     if FLAGS.mode == 'decode':
         hps['max_dec_steps'] = 1
-
-    if FLAGS.baseline:
-        hps['coverage'] = False
 
     hps = namedtuple('HyperParams', hps.keys())(**hps)
 
@@ -111,7 +115,6 @@ def run_training(model, batcher):
     model.build(device='/cpu:0' if FLAGS.cpu_only else None)
 
     if FLAGS.convert2coverage:
-
         assert FLAGS.coverage, 'To convert your model to a coverage model, run with convert_to_coverage=True and coverage=True'
 
         convert2coverage()

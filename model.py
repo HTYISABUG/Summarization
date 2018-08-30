@@ -25,8 +25,9 @@ class Model(object):
         enc_lens            = tf.placeholder(tf.int32, [hps.batch_size], name='enc_lens') # sentence lengths
         enc_pad_mask        = tf.placeholder(tf.float32, [hps.batch_size, None], name='enc_pad_mask') # mask the PAD tokens
 
-        if not hps.baseline:
+        if hps.p_gen:
             enc_batch_ext_vocab = tf.placeholder(tf.int32, [hps.batch_size, None], name='enc_batch_ext_vocab')
+            self.__enc_batch_ext_vocab = enc_batch_ext_vocab
             self.__max_n_oov    = tf.placeholder(tf.int32, [], name='max_n_oov')
 
         # decoder
@@ -37,7 +38,6 @@ class Model(object):
         # previous coverage
         if hps.mode == 'decode' and hps.coverage:
             prev_coverage = tf.placeholder(tf.float32, [hps.batch_size, None], name='prev_coverage')
-
             self.__prev_coverage = prev_coverage
         else:
             prev_coverage = None
@@ -45,35 +45,33 @@ class Model(object):
         # previous context vector
         if hps.mode == 'decode':
             prev_context_vector = tf.placeholder(tf.float32, [hps.batch_size, hps.hidden_dim * 2], name='prev_context_vector')
-
             self.__prev_context_vector = prev_context_vector
         else:
             prev_context_vector = None
 
+        # build seq2seq
         with tf.device(device or '/device:GPU:0'), tf.variable_scope('seq2seq', reuse=tf.AUTO_REUSE):
             enc_inputs, dec_inputs = self.__build_embedding(enc_batch, dec_batch)
             enc_outputs, fw_stat, bw_stat = self.__build_encoder(enc_inputs, enc_lens)
             dec_in_state = self.__build_reduce_states(fw_stat, bw_stat)
-            dec_outputs, dec_out_state, attn_dists, p_gens, coverage, context_vector = self.__build_decoder(
-                    dec_inputs, enc_outputs, dec_in_state, enc_pad_mask, prev_coverage, prev_context_vector)
+            dec_outputs, dec_out_state, attn_dists, p_gens, context_vector, coverage = self.__build_decoder(
+                    dec_inputs, enc_outputs, dec_in_state, enc_pad_mask, prev_context_vector, prev_coverage)
             vocab_dists = self.__build_vocab_distribution(dec_outputs)
 
-            if not hps.baseline:
+            final_dists = vocab_dists
+
+            if hps.p_gen:
                 final_dists = self.__build_final_distribution(vocab_dists, attn_dists, p_gens, enc_batch_ext_vocab)
-            else:
-                final_dists = vocab_dists
 
             loss = self.__build_loss(final_dists, dec_pad_mask, target_batch)
 
             if hps.coverage:
                 coverage_loss = self.__build_coverage_loss(attn_dists, dec_pad_mask)
-                total_loss = loss + hps.cov_loss_weight + coverage_loss
-
                 self.__coverage_loss = coverage_loss
-            else:
-                total_loss = loss
 
-            train_op = self.__build_train_op(total_loss)
+                loss += hps.cov_loss_weight + coverage_loss
+
+            train_op = self.__build_train_op(loss)
 
         if hps.mode == 'decode':
             assert len(final_dists) == 1
@@ -94,9 +92,6 @@ class Model(object):
         self.__enc_lens            = enc_lens
         self.__enc_pad_mask        = enc_pad_mask
 
-        if not hps.baseline:
-            self.__enc_batch_ext_vocab = enc_batch_ext_vocab
-
         self.__dec_batch           = dec_batch
         self.__dec_pad_mask        = dec_pad_mask
         self.__target_batch        = target_batch
@@ -110,8 +105,8 @@ class Model(object):
         self.__dec_out_state  = dec_out_state
         self.__attn_dists     = attn_dists
         self.__p_gens         = p_gens
-        self.__coverage       = coverage
         self.__context_vector = context_vector
+        self.__coverage       = coverage
 
         total_memory = 0
 
@@ -205,7 +200,7 @@ class Model(object):
 
             return tf.contrib.rnn.LSTMStateTuple(decoder_c, decoder_h)
 
-    def __build_decoder(self, inputs, enc_outputs, state, enc_pad_mask, prev_coverage=None, prev_context_vec=None):
+    def __build_decoder(self, inputs, enc_outputs, state, enc_pad_mask, prev_context_vec=None, prev_coverage=None):
 
         '''Add attention decoder to the graph.
 
@@ -214,16 +209,16 @@ class Model(object):
             enc_outputs: A tensor of shape [batch_size, <= max_enc_steps, 2 * hidden_dim].
             state: LSTMStateTuple with hidden_dim units.
             enc_pad_mask: A tensor of shape [batch_size, <= max_enc_steps].
-            prev_coverage: Previous coverage
             prev_context_vec: Previous context vector
+            prev_coverage: Previous coverage
 
         Returns:
             outputs: List of tensors; the outputs of the decoder
             state: The final state of the decoder
             attn_dists: A list containing tensors of shape (batch_size,attn_length).
             p_gens: A list of tensors shape (batch_size, 1); the generation probabilities
-            coverage: A tensor, the current coverage
             context vector: A tensor, the current context vector
+            coverage: A tensor, the current coverage
         '''
 
         hps = self.__hps
@@ -277,12 +272,12 @@ class Model(object):
                     output = tf.layers.dense(output_feature, hps.hidden_dim, name='output')
                     outputs.append(output)
 
-                    if not hps.baseline:
+                    if hps.p_gen:
                         p_gen_feature = tf.concat([context_vector, cell_state.c, cell_state.h, input_], axis=1)
                         p_gen = tf.layers.dense(p_gen_feature, 1, activation=tf.nn.sigmoid, name='p_gen')
                         p_gens.append(p_gen)
 
-            return outputs, state.cell_state, attn_dists, p_gens, mechanism.coverage, context_vector
+            return outputs, state.cell_state, attn_dists, p_gens, context_vector, mechanism.coverage
 
     def __build_vocab_distribution(self, inputs):
         hps = self.__hps
@@ -393,20 +388,22 @@ class Model(object):
             just_enc: Boolean. If True, only feed the parts needed for the encoder.
         '''
 
+        hps = self.__hps
+
         feed_dict = {}
 
         feed_dict[self.__enc_batch]           = batch.enc_batch
         feed_dict[self.__enc_lens]            = batch.enc_lens
         feed_dict[self.__enc_pad_mask]        = batch.enc_pad_mask
 
-        if not self.__hps.baseline:
+        if hps.p_gen:
             feed_dict[self.__enc_batch_ext_vocab] = batch.enc_batch_ext_vocab
             feed_dict[self.__max_n_oov]           = batch.max_n_oov
 
         if not just_enc:
             feed_dict[self.__dec_batch]    = batch.dec_batch
             feed_dict[self.__dec_pad_mask] = batch.dec_pad_mask
-            feed_dict[self.__target_batch] = batch.target_batch
+            feed_dict[self.__target_batch] = batch.ext_target_batch if hps.p_gen else batch.target_batch
 
         return feed_dict
 
